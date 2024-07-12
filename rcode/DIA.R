@@ -3,6 +3,8 @@
 # MS Proteomics Pipeline - DIA Unlabeled - Written for DIA-NN report.tsv files ONLY
   #DIA-NN:  Demichev, V., et al. (2020). https://doi.org/10.1038/s41592-019-0638-x
 
+#Version 1.1 - Release: July 12, 2024
+
 #Written by Sarah Garcia, Lea Barny, Jake Hermanson - 2024
 
 #Set Working Directory - unique to each system
@@ -25,15 +27,27 @@ library(diann)            #DIA only (peptide to protein roll-up)
 library(broom)            #Used for t.tests
 library(ggfortify)        #Used for the PCA plot
 
+### (OPTIONAL LIBRARIES) ### - Load for each optional step if desired
+library(cleaver)          #used for sequence coverage
+library(EnhancedVolcano)  #used for EnhancedVolcano plot
+library(VennDiagram)      #used for making VennDiagrams
+library(NbClust)          ####
+library(clusterCrit)      # ^
+library(factoextra)       #Used for k-means clustering and heatmap
+library(cluster)          # V
+library(fpc)              # V
+library(pheatmap)         ####
+
 #Load functions
 load_file <- function(file){
   as.data.frame(fread(file, stringsAsFactors = FALSE))
 }                         #works with .csv and .tsv; not .xlsx
-diann.dia.qc <- function(raw.data, cont.name){
+diann.dia.qc <- function(raw.data, rm.cont = FALSE, 
+                         cont.name = NA){
   
   chomp.contaminants<-function(file){  
     
-    fasta.file <- fread(file, stringsAsFactors = FALSE, header = FALSE)
+    fasta.file <- fread(file, stringsAsFactors = FALSE, header = FALSE, sep = "\n")
     
     i=0                                             #Initialize empty objects
     flag=0
@@ -93,31 +107,28 @@ diann.dia.qc <- function(raw.data, cont.name){
       dplyr::select(-cat)
     
   }  #function written to reformat .fasta files
-  contaminants.info <- chomp.contaminants(file = cont.name) #import DIA contaminant file
   
-  #Add list of contaminants to be removed from data before protein quantification: 
-  contaminants <- contaminants.info$UniProt.AC
+  contaminants <- ""
+  
+  if(rm.cont == TRUE){
+    contaminants.info <- chomp.contaminants(file = cont.name) #import DIA contaminant file
+    
+    #Add list of contaminants to be removed from data before protein quantification: 
+    contaminants <- contaminants.info$UniProt.AC
+  }
   
   cat("Cleaning up raw data...\n")                  #print message to console
   
   before <- length(unique(raw.data$Protein.Group))  #store size for comparison
   
-  # #Data Clean-up - Parameters set at: Q.value <= 0.01; 1+ Peptide per Protein
-  # raw.data.filtered <- raw.data %>%                                       #Takes our imported raw data
-  #   group_by(Protein.Group) %>%                                           #Sort peptides into groups based on sequence
-  #   filter(sum(grepl(Protein.Group[1], contaminants)) == 0) %>%           #filter out groups that match a given contaminant
-  #   filter(Global.Q.Value <= 0.01) %>% filter(Q.Value <= 0.01) %>%        #Filter for qvalues
-  #   group_by(Run, Protein.Group) %>%                                      #group by Run and Protein.Group
-  #   filter(length(unique(paste0(Modified.Sequence, Precursor.Charge)))>1) #Filters for lengths > 1 of pasted sequence 
-  # 
-  
   #Data Clean-up - Parameters set at: Q.value <= 0.01; 1+ Peptide per Protein
   raw.data.filtered <- raw.data %>%                                       #Takes our imported raw data
     group_by(Protein.Group) %>%                                           #Sort peptides into groups based on sequence
     filter(!str_detect(Protein.Group, "^Cont_")) %>%                      #filter out groups that match a given contaminant
+    filter(!Protein.Group %in% contaminants) %>%                          #filter out contaminant accessions
     filter(Global.Q.Value <= 0.01) %>% filter(Q.Value <= 0.01) %>%        #Filter for qvalues
     group_by(Run, Protein.Group) %>%                                      #group by Run and Protein.Group
-    filter(length(unique(paste0(Modified.Sequence, Precursor.Charge)))>1) #Filters for lengths > 1 of pasted sequence 
+    filter(length(unique(Stripped.Sequence))>1)                           #Filters for lengths > 1 of pasted sequence 
   
   after <- length(unique(raw.data.filtered$Protein.Group))                #store size for comparison
   
@@ -127,10 +138,11 @@ diann.dia.qc <- function(raw.data, cont.name){
   
   export.file <- raw.data.filtered %>%                                    #take our qc filtered data                   
     dplyr::select(Run, Protein.Group, Genes, Stripped.Sequence,           #select relevant columns
-                  Precursor.Id, Precursor.Normalised) %>%                 
-    tidyr::unite(Protein.Info, Genes, Protein.Group, sep = "*")                  #combine two columns, separated by '*'
+                  Precursor.Id, Precursor.Normalised) %>%   
+    mutate(Precursor.Normalised = na_if(Precursor.Normalised, 0)) %>%     #replace any zeros with NA
+    tidyr::unite(Protein.Info, Genes, Protein.Group, sep = "*")           #combine two columns, separated by '*'
   
-}       #import diann file and contaminants file; apply quality control filters
+}            #import diann file and contaminants file; apply quality control filters
 assign.group <- function(df, groups = treatments){
   
   sample.names <- unique(df$Run)                                     #store unique sample names
@@ -203,7 +215,7 @@ filter.NA <- function(df, points = 3){
   
   combined_df <- Reduce(function(x, y) full_join(x, y, by = c("Protein.Info")), test)
   sample.amount <- ncol(combined_df) - 1
-  combined_df_filter <- combined_df %>% unique() %>% filter(rowSums(is.na(.)) < sample.amount)
+  combined_df_filter <- combined_df %>% distinct() %>% filter(rowSums(is.na(.)) < sample.amount)
 }               #filter for minimum # of points per observation
 info.group <- function(df){
   group.size <- data.frame(df) %>%                       #get group size (rows)
@@ -223,6 +235,208 @@ average.FC <- function(data){
   Avg.FC.log2 <- test %>% purrr::reduce(full_join, by = "Protein.Info")
 }                        #function to calculate treatment avg.Log2FC
 
+### (OPTIONAL FUNCTIONS) ### - Load for each optional step if desired
+digest.one.species <- function(species.list, dir) {
+  
+  chomp.protein<-function(species.list,dir){  
+    
+    proteome <- read_delim(dir, delim = "\n", col_names = FALSE, col_types = "c")
+    proteome.list <- proteome %>% na.omit() %>% data.frame()
+    
+    i=0                                             #Initialize empty objects for faster processing time
+    flag=0
+    y<-data.frame()
+    protein.size<-list()
+    sequence.all<-list()
+    alist<-list()
+    species.name<-species.list                      #this will be user supplied, must match how it looks in FASTA
+    b<-''
+    c<-''
+    
+    cat(paste("Now importing:",dir, "\n"))        #basic progress checker
+    for(i in proteome.list[ ,1]){                 #for each line of inputted proteomeFASTA
+      if(str_detect(i,"^>")){                     #if row starts with >
+        if(flag==1){                              #flag check to concatenate sequence lines
+          sequence<-str_c(alist,collapse = "")    #collapse
+          aasize<-nchar(sequence)                 #get amino acid size
+          protein.size<-rbind.data.frame(protein.size,aasize)  #store size
+          sequence.all<-rbind.data.frame(sequence.all,sequence)  #store sequence
+          alist<-list()                           #empty temp variable
+          flag=0                                  #reset flag
+        }
+        flag=0                                    #reset
+        pattern.species<-paste0("OS=",species.list)#make species name pattern
+        pattern.gn<-paste0("GN=\\S+")             #make gene name pattery
+        pattern.type<-paste0("^>\\S+")            #make >tr or >sp pattern 
+        a<-str_extract(i,pattern = pattern.species) #find and store species name (user supplies species name)
+        b<-str_extract(i,pattern = pattern.gn)    #find and store gene name
+        c<-str_extract(i,pattern = pattern.type)  #find and store pattern type (>tr or >sp, should be only two options)
+        abc<-c(a,b,c)                             #make above identifiers into easy to bind object
+        y<-rbind(y,abc)                           #rbind to fill rows of new df
+      }
+      else{
+        flag=1                                    #Raise the flag!
+        b<-str_trim(i,side = c("right"))          #Cut off new line character
+        alist[[i]]<-b                             #Storing all sequence lines of current protein
+      }
+    }
+    if(flag==1){                                  #this catches the last protein's sequence VVV
+      sequence<-str_c(alist,collapse = "")        #
+      aasize<-nchar(sequence)                     #
+      protein.size<-rbind.data.frame(protein.size,aasize) #
+      sequence.all<-rbind.data.frame(sequence.all,sequence) #
+      alist<-list()                               #
+      flag=0                                      #^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    }
+    y[,4]<-protein.size                             #add sizes to df
+    y[,5]<-sequence.all                             #add sequences to df
+    colnames(y)<-c("Species","Gene.Name","UniProt Type","AA Length","Sequence") #add colnames to object 'y'
+    y$Species <- str_replace_all(y$Species, "OS=", "")  #remove OS= from species column
+    y$`Gene.Name` <- str_replace_all(y$`Gene.Name`, "GN=", "")  #remove GN= from gene name column
+    proteomes<<-y %>% separate(`UniProt Type`, into = c("discard", "UniProt.AC","discard2"), sep = "\\|") %>%
+      dplyr::select(-discard,-discard2)              #Drop the 'discard' columns
+  }   #Load 'chomp' function to import proteome files
+  chomp.protein(species.list,dir)                  #Generate 'Proteomes" object (both species combined)
+  
+  species.A <<- species.list[[1]]                  #Store species names
+  
+  proteomes.A <- proteomes %>%                     #Take our Proteomes object
+    filter(Species == species.A)
+  
+  #If missing a gene name, fill in name with UniProt Accession number
+  proteomes.A$Gene.Name <- ifelse(is.na(proteomes.A$Gene.Name), 
+                                  proteomes.A$UniProt.AC, proteomes.A$Gene.Name)
+  
+  cat("Now cleaving peptides...\n")
+  
+  #Create filtered peptide list
+  tryp.digest.A <- proteomes.A$Sequence %>%       #Looks at protein sequences one at a time
+    cleave(enzym = "trypsin", missedCleavages = 0:1, unique = TRUE) %>% #Specify trypsin enzyme, 0-1 missed cleavages, and only unique peptides (per protein)
+    lapply(data.frame) %>%                        #Makes all list entries into data frames
+    setNames(str_c(proteomes.A$Gene.Name, proteomes.A$UniProt.AC, proteomes.A$Species, sep = '*')) %>% #Rename data frames with the associated protein name
+    lapply(bind_rows) %>%                         #Collapses the peptides into single protein entries (all peptides are grouped under their associated protein)
+    lapply(function(df) {                         #Make a small function to apply across the list
+      filtered_df <- filter(df, str_length(X..i..) > 6 & str_length(X..i..) < 31) #filter for peptides with charLength 6 < x < 31
+      colnames(filtered_df) <- "Peptide"          #Rename the column names of each protein data frame
+      return(filtered_df)                         #Gives the edited filtered_df back to the parent pipe sequence
+    }) %>% discard(~ nrow(.) == 0)                #discard proteins with zero peptides (after filtering for length)
+  
+  cat("Performing species identification...\n")
+  
+  #Assemble Species.A Peptides
+  species.A.peptides <- tryp.digest.A %>%         #Takes our tryptic digestion
+    bind_rows(.id = "source") %>%                 #Collapses protein data frames into a single data frame
+    dplyr::select(source, Peptide) %>%            #Selects for specified columns in specified order
+    separate_wider_delim(cols = source, delim = '*', names = c("Gene.Name", "UniProt.Id", "Species")) #Separates 'source' column into three columns (descriptors)
+  
+  #Group by similar peptides, filter for groups with only one entry (proteotypic)
+  proteotypic.A <- species.A.peptides %>% group_by(Peptide) %>% filter(n() == 1) %>% mutate(P=1)
+  
+  #Group by similar peptides, filter for groups with one+ entry (razor)
+  multi.A <- species.A.peptides %>% group_by(Peptide) %>% filter(n() > 1) %>% mutate(P=0)
+  
+  #We now have a master list of all peptides with Proteotypic Status
+  all.species.all.peptides<<-bind_rows(proteotypic.A, multi.A)
+  
+  cat("Done!\n")
+  
+}  #function to generate library for sequence coverage
+protein.cov <- function(df){
+  
+  cat("Gathering peptide information...\n")
+  
+  #Subset peptides
+  peptides.stripped <- df %>% data.frame() %>%
+    dplyr::select(Run, Protein.Info, Stripped.Sequence)
+  
+  #get protein sequence information
+  proteomes.x <- proteomes %>% unite(Protein.Info, Gene.Name, UniProt.AC, sep = "*") %>%
+    dplyr::select(Protein.Info, `AA Length`, Sequence)
+  
+  #get peptide positions
+  peptide.positions <- peptides.stripped %>% data.frame() %>% 
+    inner_join(proteomes.x, by = "Protein.Info") %>%
+    distinct() %>% group_by(Run) %>%
+    mutate(Pep.aa = nchar(Stripped.Sequence),
+           Start = map2(Stripped.Sequence, Sequence, ~ gregexpr(.x, .y)[[1]])) %>%
+    unnest(Start) %>% mutate(End = (Start + Pep.aa) - 1) %>%
+    filter(Start > 0 & End > 0)
+  
+  cat("Mapping peptides...\n")
+  
+  coverage_data <- peptide.positions %>%
+    group_by(Run, Protein.Info, Sequence, `AA Length`) %>%
+    summarise(
+      coverage_map = list(
+        Reduce(`|`, map2(Start, End, ~ {
+          coverage <- rep(FALSE, unique(`AA Length`))
+          coverage[.x:.y] <- TRUE
+          coverage
+        }))
+      ),
+      .groups = 'drop'
+    ) %>% mutate(protSum = map_int(coverage_map, sum), 
+                 perCov = (protSum / `AA Length`) * 100) %>%
+    select(Run, Protein.Info, protSum, perCov)
+  
+  protein.coverage <<- peptide.positions %>%
+    left_join(coverage_data, by = c("Run", "Protein.Info")) %>%
+    dplyr::select(Run, Protein.Info, perCov) %>% distinct()
+  
+  cat("Done! 'protein.coverage' created.\n")
+  
+}                         #functino to calculate protein sequence coverage
+volcano.curve <- function(result.volcano,                #function to plot curvature volcano
+                          c.95 = 0.4,             #Define curvature
+                          c.99 = 0.8,             #Define high-confidence curvature
+                          x0 = 0.5,               #Define minimum fold change
+                          adjpCutoff = 0.01){
+  
+  #adding curve cutoff
+  curve_cutoff <- function(lfc, c, x0, sigma) {
+    return(c * sigma / (lfc - x0))
+  }
+  
+  mirrored_function <- function(x, c, x0, sigma) {
+    ifelse(abs(x) > x0, curve_cutoff(abs(x), c, x0, sigma), NA)
+  }
+  
+  # Calculate standard deviation of log2 fold changes
+  sigma <- sd(result.volcano$estimate, na.rm = TRUE)
+  
+  # Calculate curve cutoff values
+  result.volcano$curve_cutoff_95 <- curve_cutoff(abs(result.volcano$estimate), c.95, x0, sigma)
+  result.volcano$curve_cutoff_99 <- curve_cutoff(abs(result.volcano$estimate), c.99, x0, sigma)
+  result.volcano$significant_med <- -log10(result.volcano$p.adj) > result.volcano$curve_cutoff_95 &
+    abs(result.volcano$estimate) >= x0
+  result.volcano$significant_high <- -log10(result.volcano$p.adj) > result.volcano$curve_cutoff_99 &
+    abs(result.volcano$estimate) >= x0
+  
+  #Calculate graph sizes
+  min.x <- as.integer(min(result.volcano$estimate, na.rm = TRUE)) - 1
+  max.x <- as.integer(max(result.volcano$estimate, na.rm = TRUE)) + 1
+  
+  min.y <- 0
+  max.y <- as.integer(max(-log10(result.volcano$p.adj), na.rm = TRUE)) + 1
+  
+  # ggplot volcano plot with specific labels
+  volcano_plot <<- ggplot(result.volcano, aes(x = estimate, y = -log10(p.adj)#, label = rownames(result.volcano)
+  )) +
+    geom_point(alpha = 0.2, colour = 'grey30') +
+    stat_function(fun = function(x) mirrored_function(x, c = c.95, x0 = x0, sigma = sigma), color = "black") +
+    stat_function(fun = function(x) mirrored_function(x, c = c.99, x0 = x0, sigma = sigma), color = "blue") +
+    theme_bw() +
+    labs(title = "Volcano Plot with Curve Cutoff Based on Standard Deviation",
+         x = "Log2 Fold Change",
+         y = "-Log10 Adjusted p-value") +
+    scale_x_continuous(breaks = seq(min.x, max.x, by = 1), limits = c(min.x, max.x))+
+    scale_y_continuous(breaks = seq(min.y, max.y, by = 1), limits = c(min.y, max.y)) +
+    geom_point(data = subset(result.volcano, significant_med), aes(color = "med-conf"), size = 2) +
+    geom_point(data = subset(result.volcano, significant_high), aes(color = "high-conf"), size = 2)
+  
+  return(volcano_plot)
+} #Define adj.p-value cutoff
+
 ############### Step One: Input and Reformat Data ##############################
 
 #Load data files - .csv or .tsv (doesn't like .xlsx)
@@ -232,7 +446,8 @@ raw.data <- load_file("your.diann.report.tsv")
     # Frankenfield, A., et al. (2022). https://doi.org/10.1021/acs.jproteome.2c00145
 
 #Clean up data files
-raw.data.qc <- diann.dia.qc(raw.data, cont.name = "your.contaminants.file.fasta")
+#(Optional Argument) - Set rm.cont = TRUE to import contaminant.fasta and remove cont. from samples
+raw.data.qc <- diann.dia.qc(raw.data, rm.cont = TRUE, cont.name = "your.contaminants.file.fasta")
 
 #Define treatment groups
 treatments <- c("treatmentA", "treatmentB", "treatmentC", "etc.")
@@ -273,16 +488,30 @@ peptides.medNorm <- medNorm(raw.data.qc.f, samples = Run, values = Precursor.Nor
 #Protein Roll-up using maxLFQ algorithm
 proteins.medNorm <- max_LFQ(peptides.medNorm, values = "Norm_abundance")
 
+    ### (OPTIONAL) Calculate Sequence Coverage for each Protein per Run [~5min.]  ###
+    
+    #Define species list and proteome directory
+    species.list<-c("Homo sapiens")                          #define species
+    dir<-"Human_uniprotkb_reviewed_2024_05_01.fasta"         #input UniProt fasta file name
+    
+    #Run functions
+    digest.one.species(species.list, dir)
+    protein.cov(df = peptides.medNorm)
+    
+    #Print mean and median protein coverage
+    print(mean(protein.coverage$perCov))
+    print(median(protein.coverage$perCov))
+    
+    ###                                                                   ###
+
 #Log2 Transformation
 proteins.medNorm.log2 <- proteins.medNorm %>% data.frame() %>% log2()
 
 ##Prepare the data for plotting - Run only one of the two lines below
-  #Run if sample names start with a number in sample.groups
-  sample.groups.v2 <- sample.groups %>% mutate(Run = paste0("X", sample)) %>% select(-sample)
-  
-  #Run if sample names start with a letter in sample.groups
-  sample.groups.v2 <- sample.groups %>% mutate(Run = paste0(sample)) %>% select(-sample)
-  ###
+  #If sample name begins with a number 0-9, paste "X" in front of it (more R-friendly)
+  sample.groups.v2 <- sample.groups %>% 
+    mutate(Run = ifelse(grepl("^[0-9]", sample), paste0("X", sample), sample)) %>% 
+    select(-sample)
 
       ### (OPTIONAL) Bait Normalization ###
       
@@ -376,7 +605,8 @@ ggplot(protein.count, aes(x= Run, y=Count, fill = group)) +
   sample_names <- data.t %>% rownames()
   
   #Run the PCA analysis
-  data.prcomp <- data.t %>% prcomp(scale = TRUE)
+  data.prcomp <- data.t %>% select(where(~ var(.) != 0))  #select columns without zero variance
+    prcomp(scale = TRUE)
   
   #Label our samples with their treatment groups
   data.groupInfo <- data.t %>%
@@ -414,225 +644,175 @@ proteins.log2.long.stat <- proteins.filtered %>%
 result.volcano <- proteins.log2.long.stat %>%
   mutate(p.adj = p.adjust(p.value, method = "fdr", n = length(p.value))) %>%
   select(Protein.Info, estimate, p.adj) %>% 
-  separate_wider_delim(cols = "Protein.Info", delim = '*', names = c("Protein", "Accession")) %>%
-  select(-Accession) %>% mutate(Protein = paste0(1:nrow(.), '-', Protein)) %>%
-  column_to_rownames(var = 'Protein') %>% data.frame()
+  column_to_rownames(var = 'Protein.Info') %>% data.frame()
 
-#Simple Volcano Plot - EnhancedVolcano package
-library(EnhancedVolcano)
-
-proteins.log2.long.stat %>%
-  mutate(p.adj = p.adjust(p.value, method = "fdr", n = length(p.value))) %>%
-  select(Protein.Info, estimate, p.adj) %>% 
-  separate_wider_delim(cols = "Protein.Info", delim = '*', names = c("Protein", "Accession")) %>%
-  select(-Accession) %>% mutate(Protein = paste0(1:nrow(.), '-', Protein)) %>%
-  column_to_rownames(var = 'Protein') %>% data.frame() %>%
-  EnhancedVolcano(lab = rownames(.), x = "estimate", y = "p.adj", pointSize = 3.0,
-                  FCcutoff = 0.5,  #set fold change cutoff
-                  pCutoff = 0.01   #set p.adj cutoff
-                  )
-
-  #Volcano plot using curvature function
-  volcano.curve <- function(result.volcano, 
-                            c.95 = 1.96,        #Define curvature
-                            c.99 = 2.576,       #Define high-confidence curvature
-                            x0 = 0.5,           #Define minimum fold change
-                            adjpCutoff = 0.01   #Define adj.p-value cutoff
-                            ){
+    ###   Simple Volcano Plot - EnhancedVolcano package   ###
+    EnhancedVolcano(result.volcano, lab = rownames(result.volcano), 
+                    x = "estimate", y = "p.adj", pointSize = 3.0,
+                    FCcutoff = 0.5,  #set fold change cutoff
+                    pCutoff = 0.01   #set p.adj cutoff
+    )
     
-                            #adding curve cutoff
-                            curve_cutoff <- function(lfc, c, x0, sigma) {
-                              return(c * sigma / (lfc - x0))
-                            }
-                            
-                            mirrored_function <- function(x, c, x0, sigma) {
-                              ifelse(abs(x) > x0, curve_cutoff(abs(x), c, x0, sigma), NA)
-                            }
-                            
-                            # Calculate standard deviation of log2 fold changes
-                            sigma <- sd(result.volcano$estimate, na.rm = TRUE)
-                            
-                            # # Define constants for the curve
-                            # c.95 <- 1.96 # Adjust based on your confidence interval (e.g., 1.96 for 95%)
-                            # c.99 <- 2.576 # Adjust based on your confidence interval (e.g., 2.576 for 99%)
-                            # x0 <- 0.5 # Minimum fold change for enriched proteins
-                            # adjpCutoff <- 0.01
-                            
-                            # Calculate curve cutoff values
-                            result.volcano$curve_cutoff_95 <- curve_cutoff(abs(result.volcano$estimate), c.95, x0, sigma)
-                            result.volcano$curve_cutoff_99 <- curve_cutoff(abs(result.volcano$estimate), c.99, x0, sigma)
-                            result.volcano$significant_med <- -log10(result.volcano$p.adj) > result.volcano$curve_cutoff_95 &
-                              abs(result.volcano$estimate) >= x0
-                            result.volcano$significant_high <- -log10(result.volcano$p.adj) > result.volcano$curve_cutoff_99 &
-                              abs(result.volcano$estimate) >= x0
-                            
-                            #Calculate graph sizes
-                            min.x <- as.integer(min(result.volcano$estimate)) - 1
-                            max.x <- as.integer(max(result.volcano$estimate)) + 1
-                            
-                            min.y <- 0
-                            max.y <- as.integer(max(-log10(result.volcano$p.adj))) + 1
-                            
-                            # ggplot volcano plot with specific labels
-                            volcano_plot <- ggplot(result.volcano, aes(x = estimate, y = -log10(p.adj)#, label = rownames(result.volcano)
-                            )) +
-                              geom_point(alpha = 0.2, colour = 'grey30') +
-                              stat_function(fun = function(x) mirrored_function(x, c = c.95, x0 = x0, sigma = sigma), color = "black") +
-                              stat_function(fun = function(x) mirrored_function(x, c = c.99, x0 = x0, sigma = sigma), color = "blue") +
-                              theme_bw() +
-                              labs(title = "Volcano Plot with Curve Cutoff Based on Standard Deviation",
-                                   x = "Log2 Fold Change",
-                                   y = "-Log10 Adjusted p-value") +
-                              scale_x_continuous(breaks = seq(min.x, max.x, by = 1), limits = c(min.x, max.x))+
-                              scale_y_continuous(breaks = seq(min.y, max.y, by = 1), limits = c(min.y, max.y)) +
-                              geom_point(data = subset(result.volcano, significant_med), aes(color = "95% C.I."), size = 2) +
-                              geom_point(data = subset(result.volcano, significant_high), aes(color = "99% C.I."), size = 2)
-                            
-                            return(volcano_plot)
-  }
+    #Filter for significant proteins - Enhanced Volcano
+    sig.prt.EV <- result.volcano %>% filter(abs(estimate) > 0.5 & p.adj < 0.01) %>%
+      rownames_to_column(var = "Protein.Info")
+    
+    ###                                                  ###
+    
+    ###   Volcano plot using curvature function          ###
+    volcano.curve(result.volcano)
+    
+    #Filter for significant proteins - Curvature Volcano
+    volcano_plot.data <- volcano_plot$data %>% 
+      filter(significant_med == TRUE | significant_high == TRUE) %>%
+      rownames_to_column(var = "Protein.Info")
+    
+    ###                                                 ###
+    
+    ###   Venn Diagram Comparing Both Volcano Plots ###
+    venn.plot <- venn.diagram(
+      x = list(Set1 = sig.prt.EV$Protein.Info, Set2 = volcano_plot.data$Protein.Info),
+      category.names = c("EV", "Curve"),
+      filename = NULL,
+      output = FALSE,
+      fill = c("blue", "yellow"),
+      alpha = 0.5,
+      cex = 1.5,
+      cat.cex = 1.5,
+      cat.col = c("black", "black")
+    )
+    
+    grid.newpage()
+    grid.draw(venn.plot)
+    
+    ###                                            ###
+
+#Perform One-way ANOVA
+  temp <- proteins.filtered %>% 
+    pivot_longer(cols = 2:ncol(.), names_to = "Run", values_to = "Log2") %>%
+    inner_join(sample.groups.v2, by = "Run") %>%
+    filter(is.finite(Log2))
   
-  volcano.curve(result.volcano)
-
-
-#Perform One-way ANOVA - [Ex. DIA]
-
-temp <- proteins.filtered %>% 
-  pivot_longer(cols = 2:ncol(.), names_to = "Run", values_to = "Log2") %>%
-  inner_join(sample.groups.v2, by = "Run") %>%
-  filter(is.finite(Log2))
-
-anova_result <- aov(Log2 ~ group, data = temp)  
-
-summary(anova_result)
-
-tukey_result <- TukeyHSD(anova_result)
-
-tukey_df <- as.data.frame(tukey_result$group)
-
-tukey_df_sig <- filter(tukey_df, `p adj` < 0.01 )
+  anova_result <- aov(Log2 ~ group, data = temp)  
+  
+  summary(anova_result)
+  
+  tukey_result <- TukeyHSD(anova_result)
+  
+  tukey_df <- as.data.frame(tukey_result$group)
+  
+  tukey_df_sig <- filter(tukey_df, `p adj` < 0.01 )
 
 ############### Additional Analysis ############################################
 
-#Step Seven: Calculate Fold Changes normalized to user-defined control
+#Calculate Fold Changes normalized to user-defined control
 
-#Define the control group
-control <- treatments[1]  
+  #Define the control group
+  control <- treatments[1]  
+  
+  #Get Control information
+  data.control <- proteins.medNorm.log2 %>% dplyr::select(ends_with(control)) %>% 
+    mutate(sd = apply(., 1, sd, na.rm = TRUE)) %>% mutate(mean = rowMeans(dplyr::select(., -sd), na.rm = TRUE))
+  
+  #Calculate Fold Changes for Original Data Frame
+  FC.log2 <- proteins.medNorm.log2 %>% mutate(Mean = data.control$mean, StDev = data.control$sd) %>%
+    mutate_at(vars(-Mean, -StDev), ~ (.-Mean)) %>% dplyr::select(-Mean, -StDev) %>% filter(rowSums(!is.na(.)) > 0)
+  
+  #Plot Fold Changes per sample
+  FC.log2 %>% rownames_to_column(var = "Protein.Info") %>%
+    pivot_longer(cols = 2:ncol(.), names_to = "Run", values_to = "Log2FC") %>%
+    inner_join(sample.groups.v2, by = "Run") %>%
+    ggplot(aes(x = Run, y = Log2FC, fill = group)) + 
+    geom_boxplot(outliers = TRUE) + theme_bw() +
+    labs(title = "A. Boxplot of Average Log2 Fold Changes",
+         x = "Log2 Fold Change",
+         y = "-Log10 Adjusted p-value") +
+    theme(axis.text.x= element_text(angle = 45, hjust =1)) +
+    facet_grid(cols = vars(group), scales = "free_x")
+  
+  #This block calculates the average fold change of each protein per treatment group
+  Avg.FC.log2 <- FC.log2 %>% average.FC() %>% filter(rowSums(!is.na(.)) > 2) %>%
+    separate_wider_delim(cols = Protein.Info, delim = '*', names = c("Protein", "UniProt.Id"))
+  
+  #This block reformats the data into long format, then plots a boxplot of the average fold changes per treatment
+  Avg.FC.log2 %>% 
+    pivot_longer(cols = 3:ncol(.), names_to = "Treatment", values_to = "AvgFC") %>%
+    ggplot(aes(x = Treatment, y = AvgFC, fill = Treatment)) + 
+    geom_boxplot(outliers = TRUE) + theme_bw() +
+    labs(title = "A. Boxplot of Average Log2 Fold Changes",
+         x = "Log2 Fold Change",
+         y = "-Log10 Adjusted p-value")
 
-#Get Control information
-data.control <- proteins.medNorm.log2 %>% dplyr::select(ends_with(control)) %>% 
-  mutate(sd = apply(., 1, sd, na.rm = TRUE)) %>% mutate(mean = rowMeans(dplyr::select(., -sd), na.rm = TRUE))
+#Clustering (Using K-Means Clustering)
 
-#Calculate Fold Changes for Original Data Frame
-FC.log2 <- proteins.medNorm.log2 %>% mutate(Mean = data.control$mean, StDev = data.control$sd) %>%
-  mutate_at(vars(-Mean, -StDev), ~ (.-Mean)) %>% dplyr::select(-Mean, -StDev) %>% filter(rowSums(!is.na(.)) > 0)
+  #Copy the data
+  clusterDF <- Avg.FC.log2
+  
+  #Replace NAs with zero
+  clusterDF[is.na(clusterDF)] <- 0
+  
+  #Reformat
+  clusterDF.mean <- clusterDF %>%
+    unite(Protein.Info, Protein, UniProt.Id, sep = "*") %>% column_to_rownames(var = "Protein.Info")
+  
+  ######## Run this when deciding the number of kmeans clusters ###############
+  #Change this to change the limit to amount of clusters you calculate for
+  clusLength <- 20
+  
+  result <- fviz_nbclust(clusterDF.mean, kmeans, method = "wss", k.max = clusLength)
+  print(result)
+  elbow <- result$data
+  
+  #start for the silhouette score calculation
+  silPoints <- 1
+  df.silhouette <- data.frame(k = 2:clusLength)
+  
+  for(i in 1:20){  for(k in 2:clusLength){
+    # Perform k-means clustering
+    kmeans_result <- kmeans(clusterDF.mean, centers = k)
+    # Compute silhouette information using silhouette function
+    sil_info <- silhouette(kmeans_result$cluster, dist(as.matrix(clusterDF.mean)))
+    silPoints[k-1] <- summary(sil_info)$avg.width
+  }
+    silhouetteDf <- data.frame(k = 2:clusLength, Score = silPoints)
+    df.silhouette <- left_join(df.silhouette, silhouetteDf, by = 'k')
+  }
+  
+  row_sds <- apply(df.silhouette, 1, sd)
+  row_mean <- apply(df.silhouette, 1, median)
+  
+  df.silMean <- data.frame(k = df.silhouette$k, means = row_mean, stdev = row_sds)
+  
+  silhouttePlot <- ggplot(silhouetteDf, aes(x = k, y = Score)) +
+    geom_line() +
+    theme_classic()
+  silhouttePlot
+  
+  silhouttePlot <- ggplot(df.silMean, aes(x = k, y = means)) +
+    geom_line() +
+    theme_classic() + labs(title = "Average of 100 Silhouette Scores")
+  silhouttePlot
+  #############################################################################
+  
+  #Change clusAmount to be the amount of clusters you decide on, based on the above plots
+  clusAmount = 10 
 
-#Plot Fold Changes per sample
-FC.log2 %>% rownames_to_column(var = "Protein.Info") %>%
-  pivot_longer(cols = 2:ncol(.), names_to = "Run", values_to = "Log2FC") %>%
-  inner_join(sample.groups.v2, by = "Run") %>%
-  ggplot(aes(x = Run, y = Log2FC, fill = group)) + 
-  geom_boxplot(outliers = TRUE) + theme_bw() +
-  labs(title = "A. Boxplot of Average Log2 Fold Changes",
-       x = "Log2 Fold Change",
-       y = "-Log10 Adjusted p-value") +
-  theme(axis.text.x= element_text(angle = 45, hjust =1)) +
-  facet_grid(cols = vars(group), scales = "free_x")
-
-#This block calculates the average fold change of each protein per treatment group
-Avg.FC.log2 <- FC.log2 %>% average.FC() %>% filter(rowSums(!is.na(.)) > 2) %>%
-  separate_wider_delim(cols = Protein.Info, delim = '*', names = c("Protein", "UniProt.Id"))
-
-#This block reformats the data into long format, then plots a boxplot of the average fold changes per treatment
-Avg.FC.log2 %>% 
-  pivot_longer(cols = 3:ncol(.), names_to = "Treatment", values_to = "AvgFC") %>%
-  ggplot(aes(x = Treatment, y = AvgFC, fill = Treatment)) + 
-  geom_boxplot(outliers = TRUE) + theme_bw() +
-  labs(title = "A. Boxplot of Average Log2 Fold Changes",
-       x = "Log2 Fold Change",
-       y = "-Log10 Adjusted p-value")
-
-#Step Eight: Clustering (Using K-Means Clustering)
-library(NbClust)
-library(clusterCrit)
-library(factoextra)
-library(cluster)
-library(fpc)
-library(pheatmap)
-
-clusterDF <- Avg.FC.log2
-clusterDF[is.na(clusterDF)] <- 0
-
-clusterDF.mean <- clusterDF %>% #filter(Avg.50 != 0 | Avg.60 != 0) %>%
-  unite(Protein.Info, Protein, UniProt.Id, sep = "*") %>% column_to_rownames(var = "Protein.Info")
-
-######## Run this when deciding the number of kmeans clusters ###############
-#Change this to change the limit to amount of clusters you calculate for
-clusLength <- 20
-
-# #remove the normalized condtion column that is all 0
-# clusterDF.mean <- clusterDF.mean.all[ ,-1]
-
-result <- fviz_nbclust(clusterDF.mean, kmeans, method = "wss", k.max = clusLength)
-print(result)
-elbow <- result$data
-
-#start for the silhouette score calculation
-silPoints <- 1
-df.silhouette <- data.frame(k = 2:clusLength)
-
-for(i in 1:20){  for(k in 2:clusLength){
-  # Perform k-means clustering
-  kmeans_result <- kmeans(clusterDF.mean, centers = k)
-  # Compute silhouette information using silhouette function
-  sil_info <- silhouette(kmeans_result$cluster, dist(as.matrix(clusterDF.mean)))
-  silPoints[k-1] <- summary(sil_info)$avg.width
-}
-  silhouetteDf <- data.frame(k = 2:clusLength, Score = silPoints)
-  df.silhouette <- left_join(df.silhouette, silhouetteDf, by = 'k')
-}
-
-row_sds <- apply(df.silhouette, 1, sd)
-row_mean <- apply(df.silhouette, 1, median)
-
-df.silMean <- data.frame(k = df.silhouette$k, means = row_mean, stdev = row_sds)
-
-silhouttePlot <- ggplot(silhouetteDf, aes(x = k, y = Score)) +
-  geom_line() +
-  theme_classic()
-silhouttePlot
-
-silhouttePlot <- ggplot(df.silMean, aes(x = k, y = means)) +
-  geom_line() +
-  theme_classic() + labs(title = "Average of 100 Silhouette Scores")
-silhouttePlot
-
-clusAmount = 10 #Change clusAmount to be the amount of clusters you decide on, based on the above plots
-
-d <- clusterDF.mean
-
-# Perform hierarchical clustering
-dist_matrix <- dist(d)  # Compute distance matrix
-hc <- hclust(dist_matrix, method = "complete")  # Perform hierarchical clustering
-
-# Perform hierarchical clustering
-clustering_rows <- hclust(dist(d)) 
-
-# Create the heatmap
-set.seed(52)   
-pheatmap.kmean<-pheatmap(d, kmeans_k = clusAmount, cluster_rows = TRUE, cluster_cols = FALSE,
-                         clustering_method = "complete",  # You can change the method as needed
-                         cutree_rows = 1,  # Number of clusters for rows, estimated from dendrogram above
-                         main = "Heatmap of Proteins with Hierarchical Clustering using K-means", 
-                         labels_row = d$Protein.Group,
-                         color = hcl.colors(50, "Temps"), fontsize_row = 10, display_numbers = TRUE)
-
-cluster.values <- pheatmap.kmean$kmeans$cluster %>% data.frame() %>% rownames_to_column() %>%
-  setNames(c("Protein.Info","Cluster"))
-
-clusterDF.mean.fixed <- clusterDF.mean %>% 
-  rownames_to_column(var = "Protein.Info") %>% full_join(cluster.values, by = "Protein.Info") %>%
-  separate_wider_delim(col = Protein.Info, names = c("Protein", "UniProt.AC"), delim = "*")
-
-#Export proteins with cluster assignment
-#write.csv(clusterDF.mean.fixed, "Avg.FC.log2.A.Kmean.csv")
+  # Create the heatmap
+  set.seed(52)   
+  pheatmap.kmean<-pheatmap(d, kmeans_k = clusAmount, cluster_rows = TRUE, cluster_cols = FALSE,
+                           clustering_method = "complete",  # You can change the method as needed
+                           cutree_rows = 1,  # Number of clusters for rows, estimated from dendrogram above
+                           main = "Heatmap of Proteins with Hierarchical Clustering using K-means", 
+                           labels_row = d$Protein.Group,
+                           color = hcl.colors(50, "Temps"), fontsize_row = 10, display_numbers = TRUE)
+  
+  cluster.values <- pheatmap.kmean$kmeans$cluster %>% data.frame() %>% rownames_to_column() %>%
+    setNames(c("Protein.Info","Cluster"))
+  
+  clusterDF.mean.fixed <- clusterDF.mean %>% 
+    rownames_to_column(var = "Protein.Info") %>% full_join(cluster.values, by = "Protein.Info") %>%
+    separate_wider_delim(col = Protein.Info, names = c("Protein", "UniProt.AC"), delim = "*")
+  
+  #Export proteins with cluster assignment
+  #write.csv(clusterDF.mean.fixed, "Avg.FC.log2.A.Kmean.csv")
 
