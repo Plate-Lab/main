@@ -2,6 +2,8 @@
 
 # MS Proteomics Pipeline - DDA TMT-Labeled
 
+#Version 1.0 - Initial Release
+
 #Written by Sarah Garcia, Lea Barny, Jake Hermanson - 2024
 
 #Set Working Directory - unique to each system
@@ -221,7 +223,6 @@ ggplot(raw.data.qc, aes(x= Condition, y=Intensity, fill= TMT)) +
   theme(axis.text.x= element_text(angle = 45, hjust =1), legend.position = "none") +
   facet_grid(cols = vars(TMT), scales = "free_x")
 
-
 #Store Sample Treatments
 treatments <- unique(raw.data.qc$Condition)
 
@@ -418,7 +419,7 @@ tukey_df_sig <- filter(tukey_df, `p adj` < 0.01 ) #should contain significant co
 
 ############### Additional Analysis ############################################
 
-#Step Seven: Calculate Fold Changes normalized to user-defined control
+#Calculate Fold Changes normalized to user-defined control
 
 #Define the control group
 control <- treatments[1]  
@@ -466,7 +467,7 @@ Avg.FC.log2 %>%
        y = "-Log10 Adjusted p-value")
 
 
-#Step Eight: Clustering (Using K-Means Clustering)
+#Clustering (Using K-Means Clustering)
 library(NbClust)
 library(clusterCrit)
 library(factoextra)
@@ -474,83 +475,74 @@ library(cluster)
 library(fpc)
 library(pheatmap)
 
-clusterDF <- Avg.FC.log2
-clusterDF[is.na(clusterDF)] <- 0
+  #Copy the data
+  clusterDF <- Avg.FC.log2
+  
+  #Replace NAs with zero
+  clusterDF[is.na(clusterDF)] <- 0
+  
+  #Reformat
+  clusterDF.mean <- clusterDF %>%
+    unite(Protein.Info, Protein, UniProt.Id, sep = "*") %>% column_to_rownames(var = "Protein.Info")
+  
+  ######## Run this when deciding the number of kmeans clusters ###############
+  #Change this to change the limit to amount of clusters you calculate for
+  clusLength <- 20
+  
+  result <- fviz_nbclust(clusterDF.mean, kmeans, method = "wss", k.max = clusLength)
+  print(result)
+  elbow <- result$data
+  
+  #start for the silhouette score calculation
+  silPoints <- 1
+  df.silhouette <- data.frame(k = 2:clusLength)
+  
+  for(i in 1:20){  for(k in 2:clusLength){
+    # Perform k-means clustering
+    kmeans_result <- kmeans(clusterDF.mean, centers = k)
+    # Compute silhouette information using silhouette function
+    sil_info <- silhouette(kmeans_result$cluster, dist(as.matrix(clusterDF.mean)))
+    silPoints[k-1] <- summary(sil_info)$avg.width
+  }
+    silhouetteDf <- data.frame(k = 2:clusLength, Score = silPoints)
+    df.silhouette <- left_join(df.silhouette, silhouetteDf, by = 'k')
+  }
+  
+  row_sds <- apply(df.silhouette, 1, sd)
+  row_mean <- apply(df.silhouette, 1, median)
+  
+  df.silMean <- data.frame(k = df.silhouette$k, means = row_mean, stdev = row_sds)
+  
+  silhouttePlot <- ggplot(silhouetteDf, aes(x = k, y = Score)) +
+    geom_line() +
+    theme_classic()
+  silhouttePlot
+  
+  silhouttePlot <- ggplot(df.silMean, aes(x = k, y = means)) +
+    geom_line() +
+    theme_classic() + labs(title = "Average of 100 Silhouette Scores")
+  silhouttePlot
+  #############################################################################
+  
+  #Change clusAmount to be the amount of clusters you decide on, based on the above plots
+  clusAmount = 10 
 
-clusterDF.mean <- clusterDF %>% #filter(Avg.50 != 0 | Avg.60 != 0) %>%
-  unite(Protein.Info, Protein, UniProt.Id, sep = "*") %>% column_to_rownames(var = "Protein.Info")
-
-######## Run this when deciding the number of kmeans clusters ###############
-#Change this to change the limit to amount of clusters you calculate for
-clusLength <- 20
-
-# #remove the normalized condtion column that is all 0
-# clusterDF.mean <- clusterDF.mean.all[ ,-1]
-
-result <- fviz_nbclust(clusterDF.mean, kmeans, method = "wss", k.max = clusLength)
-print(result)
-elbow <- result$data
-
-#start for the silhouette score calculation
-silPoints <- 1
-df.silhouette <- data.frame(k = 2:clusLength)
-
-for(i in 1:20){  for(k in 2:clusLength){
-  # Perform k-means clustering
-  kmeans_result <- kmeans(clusterDF.mean, centers = k)
-  # Compute silhouette information using silhouette function
-  sil_info <- silhouette(kmeans_result$cluster, dist(as.matrix(clusterDF.mean)))
-  silPoints[k-1] <- summary(sil_info)$avg.width
-}
-  silhouetteDf <- data.frame(k = 2:clusLength, Score = silPoints)
-  df.silhouette <- left_join(df.silhouette, silhouetteDf, by = 'k')
-}
-
-row_sds <- apply(df.silhouette, 1, sd)
-row_mean <- apply(df.silhouette, 1, median)
-
-df.silMean <- data.frame(k = df.silhouette$k, means = row_mean, stdev = row_sds)
-
-silhouttePlot <- ggplot(silhouetteDf, aes(x = k, y = Score)) +
-  geom_line() +
-  theme_classic()
-silhouttePlot
-
-silhouttePlot <- ggplot(df.silMean, aes(x = k, y = means)) +
-  geom_line() +
-  theme_classic() + labs(title = "Average of 100 Silhouette Scores")
-silhouttePlot
-
-clusAmount = 10 #Change clusAmount to be the amount of clusters you decide on, based on the above plots
-
-d <- clusterDF.mean
-
-# Perform hierarchical clustering
-dist_matrix <- dist(d)  # Compute distance matrix
-hc <- hclust(dist_matrix, method = "complete")  # Perform hierarchical clustering
-
-# Perform hierarchical clustering
-clustering_rows <- hclust(dist(d)) 
-
-# Create the heatmap
-set.seed(52)   
-pheatmap.kmean<-pheatmap(d, kmeans_k = clusAmount, cluster_rows = TRUE, cluster_cols = FALSE,
-                         clustering_method = "complete",  # You can change the method as needed
-                         cutree_rows = 1,  # Number of clusters for rows, estimated from dendrogram above
-                         main = "Heatmap of Proteins with Hierarchical Clustering using K-means", 
-                         labels_row = d$Protein.Group,
-                         color = hcl.colors(50, "Temps"), fontsize_row = 10, display_numbers = TRUE)
-
-cluster.values <- pheatmap.kmean$kmeans$cluster %>% data.frame() %>% rownames_to_column() %>%
-  setNames(c("Protein.Info","Cluster"))
-
-clusterDF.mean.fixed <- clusterDF.mean %>% 
-  rownames_to_column(var = "Protein.Info") %>% full_join(cluster.values, by = "Protein.Info") %>%
-  separate_wider_delim(col = Protein.Info, names = c("Protein", "UniProt.AC"), delim = "*")
-
-#Export proteins with cluster assignment
-#write.csv(clusterDF.mean.fixed, "Avg.FC.log2.A.Kmean.csv")
-
-
-
+  # Create the heatmap
+  set.seed(52)   
+  pheatmap.kmean<-pheatmap(d, kmeans_k = clusAmount, cluster_rows = TRUE, cluster_cols = FALSE,
+                           clustering_method = "complete",  # You can change the method as needed
+                           cutree_rows = 1,  # Number of clusters for rows, estimated from dendrogram above
+                           main = "Heatmap of Proteins with Hierarchical Clustering using K-means", 
+                           labels_row = d$Protein.Group,
+                           color = hcl.colors(50, "Temps"), fontsize_row = 10, display_numbers = TRUE)
+  
+  cluster.values <- pheatmap.kmean$kmeans$cluster %>% data.frame() %>% rownames_to_column() %>%
+    setNames(c("Protein.Info","Cluster"))
+  
+  clusterDF.mean.fixed <- clusterDF.mean %>% 
+    rownames_to_column(var = "Protein.Info") %>% full_join(cluster.values, by = "Protein.Info") %>%
+    separate_wider_delim(col = Protein.Info, names = c("Protein", "UniProt.AC"), delim = "*")
+  
+  #Export proteins with cluster assignment
+  #write.csv(clusterDF.mean.fixed, "Avg.FC.log2.A.Kmean.csv")
 
