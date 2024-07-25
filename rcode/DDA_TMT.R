@@ -2,12 +2,14 @@
 
 # MS Proteomics Pipeline - DDA TMT-Labeled
 
-#Version 1.0 - Initial Release
+#Version 1.1 - Released July 25th
 
 #Written by Sarah Garcia, Lea Barny, Jake Hermanson - 2024
 
 #Set Working Directory - unique to each system
 setwd("path/to/your/data.csv OR data.tsv/file")
+
+setwd("C:/Users/nyanc/OneDrive/Documents/All Files - personal/Work_Vandy/R_misc/Generic_MS_pipeline/Version1.0_Generic")
 
 #Goal: Analyze Mass Spectrometry Data (TMT-Labeled DDA)
 #       and perform statistical testing
@@ -23,8 +25,11 @@ setwd("path/to/your/data.csv OR data.tsv/file")
 library(tidyverse)        #used in almost every function
 library(data.table)       #used in almost every function
 library(broom)            #Used for t.tests
-library(EnhancedVolcano)  #Fancy Volcano plot package
 library(ggfortify)        #Used for the PCA plot
+
+### (OPTIONAL LIBRARIES) ### - Load for each optional step if desired
+library(EnhancedVolcano)  #used for EnhancedVolcano plot
+library(VennDiagram)      #used for making VennDiagrams
 
 #Load functions
 load_file <- function(file){
@@ -94,38 +99,24 @@ tmt.dda.qc <- function(raw.data){
       select(-Gene_Symbol, -Accession)                             #remove irrelevant columns
   }
   
+  before <- length(unique(data.sorted$Protein.Info))               #store size for comparison
+  
   raw.data.sorted <- data.sorted %>%                               #Take our almost-finished file
-    filter(!str_detect(Protein.Info, "contaminant"))               #remove any proteins that are listed as contaminant
+    unite("Condition", Condition, starts_with("X_"),               #Combine condition columns into single
+          sep = ",", remove = TRUE) %>%
+    filter(!str_detect(Protein.Info, 
+                       regex("contaminant|cont|Contaminant|Cont")))                 #remove any proteins that are listed as contaminant
+  
+  after <- length(unique(raw.data.sorted$Protein.Info))            #store size for comparison
+  
+  removed <- (1-(after/before))*100                                #get size comparison
+  
+  cat("\nRemoved", removed, "% of the data due to:\n identified as contaminant.\n")
+  
+  raw.data.sorted <- raw.data.sorted %>% mutate_at(vars(2:ncol(.)), ~ str_replace_all(., "\\s+", "")) %>%
+    mutate(Intensity = as.numeric(Intensity))
   
 }                    #import PD / TMT file and apply quality control filters
-filter.NA <- function(df, points = 3){
-  
-  test <- list()                                         #initialize empty list
-  
-  df.wide <- df %>% pivot_wider(                         #take the data.frame, pivot wider
-    names_from = 'Run', 
-    values_from = 'Precursor.Normalised'
-  )
-  
-  for(i in treatments){                                  #for each treatment specified
-    sample.number <- df.wide %>%                         #take our wide data.frame
-      dplyr::select(Protein.Info,                        #select treatment columns
-                    Precursor.Id, ends_with(i)
-      ) %>% ncol(.)-2                      #store number of treatment columns
-    NA.amount <- sample.number - points                  #number of treatment columns minus minimum number of points
-    test[[i]] <- df.wide %>%                             #take our wide data.frame
-      dplyr::select(Protein.Info, Precursor.Id,          #select treatment columns  
-                    ends_with(i)) %>% 
-      filter(rowSums(is.na(.)) <= NA.amount)             #filter for columns that meet the criteria
-  }
-  
-  combined_df <- Reduce(function(x, y) full_join(x, y, by = c("Precursor.Id", "Protein.Info")), test)
-  sample.amount <- ncol(combined_df) - 2
-  combined_df_filter <- combined_df %>% unique() %>% filter(rowSums(is.na(.)) < sample.amount) %>%
-    pivot_longer(cols = 3:ncol(.), names_to = "Run", values_to = "Precursor.Normalised") %>%
-    filter(Precursor.Normalised != 0) %>%
-    inner_join(df, by = c("Protein.Info", "Run", "Precursor.Id", "Precursor.Normalised"))
-}               #filter for minimum # of points per observation
 medNorm <- function(df, samples = Run, 
                     values = Precursor.Normalised) { 
   df %>% data.frame() %>%                                #take your specified data.frame
@@ -189,19 +180,79 @@ average.FC <- function(data){
   Avg.FC.log2 <- test %>% purrr::reduce(full_join, by = "Protein.Info")
 }                        #function to calculate treatment avg.Log2FC
 
+### (OPTIONAL FUNCTIONS) ### - Load for each optional step if desired
+volcano.curve <- function(result.volcano,                #function to plot curvature volcano
+                          c.95 = 0.4,             #Define curvature
+                          c.99 = 0.8,             #Define high-confidence curvature
+                          x0 = 0.5,               #Define minimum fold change
+                          adjpCutoff = 0.01){
+  
+  #adding curve cutoff
+  curve_cutoff <- function(lfc, c, x0, sigma) {
+    return(c * sigma / (lfc - x0))
+  }
+  
+  mirrored_function <- function(x, c, x0, sigma) {
+    ifelse(abs(x) > x0, curve_cutoff(abs(x), c, x0, sigma), NA)
+  }
+  
+  # Calculate standard deviation of log2 fold changes
+  sigma <- sd(result.volcano$estimate, na.rm = TRUE)
+  
+  # Calculate curve cutoff values
+  result.volcano$curve_cutoff_95 <- curve_cutoff(abs(result.volcano$estimate), c.95, x0, sigma)
+  result.volcano$curve_cutoff_99 <- curve_cutoff(abs(result.volcano$estimate), c.99, x0, sigma)
+  result.volcano$significant_med <- -log10(result.volcano$p.adj) > result.volcano$curve_cutoff_95 &
+    abs(result.volcano$estimate) >= x0
+  result.volcano$significant_high <- -log10(result.volcano$p.adj) > result.volcano$curve_cutoff_99 &
+    abs(result.volcano$estimate) >= x0
+  
+  #Calculate graph sizes
+  min.x <- as.integer(min(result.volcano$estimate, na.rm = TRUE)) - 1
+  max.x <- as.integer(max(result.volcano$estimate, na.rm = TRUE)) + 1
+  
+  min.y <- 0
+  max.y <- as.integer(max(-log10(result.volcano$p.adj), na.rm = TRUE)) + 1
+  
+  # ggplot volcano plot with specific labels
+  volcano_plot <<- ggplot(result.volcano, aes(x = estimate, y = -log10(p.adj)#, label = rownames(result.volcano)
+  )) +
+    geom_point(alpha = 0.2, colour = 'grey30') +
+    stat_function(fun = function(x) mirrored_function(x, c = c.95, x0 = x0, sigma = sigma), color = "black") +
+    stat_function(fun = function(x) mirrored_function(x, c = c.99, x0 = x0, sigma = sigma), color = "blue") +
+    theme_bw() +
+    labs(title = "Volcano Plot with Curve Cutoff Based on Standard Deviation",
+         x = "Log2 Fold Change",
+         y = "-Log10 Adjusted p-value") +
+    scale_x_continuous(breaks = seq(min.x, max.x, by = 1), limits = c(min.x, max.x))+
+    scale_y_continuous(breaks = seq(min.y, max.y, by = 1), limits = c(min.y, max.y)) +
+    geom_point(data = subset(result.volcano, significant_med), aes(color = "med-conf"), size = 2) +
+    geom_point(data = subset(result.volcano, significant_high), aes(color = "high-conf"), size = 2)
+  
+  return(volcano_plot)
+} #Define adj.p-value cutoff
+
 ############### Step One: Input and Reformat Data ##############################
 
 #Load data files - .csv or .tsv (doesn't like .xlsx)
 raw.data <- load_file("your.data.file.csv OR .tsv")
 
+raw.data <- load_file("TMTtest_20240605_JAO_02_002_DelCANX_18plex_consensus_search2.csv")
+
 #Clean up data files
 raw.data.qc <- tmt.dda.qc(raw.data)
+
+#Store Sample Treatments
+treatments <- unique(raw.data.qc$Condition)
+
+#Optional Filtering (points = 1 for removal of only NA rows)
+raw.data.qc.filtered <- filter.NA(raw.data.qc, points = 1)
 
 ### Visualization ###
 
 #Boxplot 1 - Raw abundances across TMT labels grouped by treatment or TMT Label
-ggplot(raw.data.qc, aes(x= TMT, y=Intensity, fill= Condition)) +
-  geom_hline(yintercept = median(raw.data.qc$Intensity, na.rm = TRUE),  #this adds a line at the global median
+ggplot(raw.data.qc.filtered, aes(x= TMT, y=Intensity, fill= Condition)) +
+  geom_hline(yintercept = median(raw.data.qc.filtered$Intensity, na.rm = TRUE),  #this adds a line at the global median
              color = "red4", linetype = "solid", size = 1) +
   geom_boxplot() +
   labs(title= "Distribution of Values Grouped by Treatment", 
@@ -212,8 +263,8 @@ ggplot(raw.data.qc, aes(x= TMT, y=Intensity, fill= Condition)) +
   facet_grid(cols = vars(Condition), scales = "free_x")
 
 #Same plot, grouped instead by TMT Label 
-ggplot(raw.data.qc, aes(x= Condition, y=Intensity, fill= TMT)) +
-  geom_hline(yintercept = median(raw.data.qc$Intensity, na.rm = TRUE), #this adds a line at the global median
+ggplot(raw.data.qc.filtered, aes(x= Condition, y=Intensity, fill= TMT)) +
+  geom_hline(yintercept = median(raw.data.qc.filtered$Intensity, na.rm = TRUE), #this adds a line at the global median
              color = "red4", linetype = "solid", size = 1) +
   geom_boxplot()+ 
   labs(title= "Distribution of Values Grouped by TMT Label", 
@@ -222,12 +273,6 @@ ggplot(raw.data.qc, aes(x= Condition, y=Intensity, fill= TMT)) +
   scale_y_log10() +
   theme(axis.text.x= element_text(angle = 45, hjust =1), legend.position = "none") +
   facet_grid(cols = vars(TMT), scales = "free_x")
-
-#Store Sample Treatments
-treatments <- unique(raw.data.qc$Condition)
-
-#Optional Filtering (points = 1 for removal of only NA rows)
-raw.data.qc.filtered <- filter.NA(raw.data.qc, points = 1)
 
 ############## Step Two: Normalization #########################################
 
@@ -298,8 +343,8 @@ data.groupInfo <- data %>%
   rownames_to_column(var = "Run") %>%
   inner_join(sample_groups, by = "Run")
 
-#Plot the PCA analysis
-autoplot(data.prcomp, data=data.groupInfo, label= FALSE, size=4, colour = 'Condition') +
+#Plot the PCA analysis - change 'colour' to grouping variable (MS_Run, Condition, etc.)
+autoplot(data.prcomp, data=data.groupInfo, label= FALSE, size=4, colour = 'MS_Run') +
   theme(axis.title.x = element_text(size = 12), axis.title.y = element_text(size = 12)) +
   labs(title = "A. Principal Component Analysis Plot")
 
@@ -309,113 +354,79 @@ autoplot(data.prcomp, data=data.groupInfo, label= FALSE, size=4, colour = 'Condi
 # Multiple t.tests w/ p.adj(method = "fdr")  -  For comparison of 2 groups
 # ANOVA / Mixed Model  -  For comparison of >= 3 groups
 
-#Perform Multiple unpaired t.tests with equal variance - Visualize via Volcano Plot [Ex. DIA]
-comparison <- c(" treatment", " control") #define in order of [treatment - control]
+#Perform Multiple unpaired t.tests with equal variance - Visualize via Volcano Plot
+comparison <- c("treatment", "control") #define in order of [treatment - control]
 
-proteins.log2.A.long.stat <- medNorm.log2.data %>%
+comparison <- c("WT,C37", "WT,delCANX")
+
+proteins.log2.long.stat <- medNorm.log2.data %>%
   dplyr::select(Run, Protein.Info, Condition, Log2) %>%
   filter(Condition %in% comparison) %>%
   mutate(Condition = factor(Condition, levels = comparison)) %>%
   group_by(Protein.Info, Condition) %>% filter(n() > 2) %>% ungroup() %>%
   group_by(Protein.Info) %>% filter(n_distinct(Condition) == 2) %>%
-  do(tidy(t.test(Log2 ~ Condition, data = ., paired = FALSE, var.equal = TRUE)))
+  do(tidy(t.test(Log2 ~ Condition, data = ., var.equal = TRUE)))
 
 #Adjust p-values
-result.volcano <- proteins.log2.A.long.stat %>%
+result.volcano <- proteins.log2.long.stat %>%
   mutate(p.adj = p.adjust(p.value, method = "fdr", n = length(p.value))) %>%
   select(Protein.Info, estimate, p.adj) %>% 
-  separate_wider_delim(cols = "Protein.Info", delim = '*', names = c("Protein", "Accession")) %>%
-  select(-Accession) %>% mutate(Protein = paste0(1:nrow(.), '-', Protein)) %>%
-  column_to_rownames(var = 'Protein') %>% data.frame()
+  column_to_rownames(var = 'Protein.Info') %>% data.frame()
 
-#Simple Volcano Plot - EnhancedVolcano package
-library(EnhancedVolcano)
-
-proteins.log2.A.long.stat %>%
-  mutate(p.adj = p.adjust(p.value, method = "fdr", n = length(p.value))) %>%
-  select(Protein.Info, estimate, p.adj) %>% 
-  separate_wider_delim(cols = "Protein.Info", delim = '*', names = c("Protein", "Accession")) %>%
-  select(-Accession) %>% mutate(Protein = paste0(1:nrow(.), '-', Protein)) %>%
-  column_to_rownames(var = 'Protein') %>% data.frame() %>%
-  EnhancedVolcano(lab = rownames(.), x = "estimate", y = "p.adj", pointSize = 3.0,
-                  FCcutoff = 0.5,  #set fold change cutoff
-                  pCutoff = 0.01   #set p.adj cutoff
-  )
-
-#Volcano plot using curvature function
-volcano.curve <- function(result.volcano, 
-                          c.95 = 1.96,        #Define curvature
-                          c.99 = 2.576,       #Define high-confidence curvature
-                          x0 = 0.5,           #Define minimum fold change
-                          adjpCutoff = 0.01   #Define adj.p-value cutoff
-){
-  
-  #adding curve cutoff
-  curve_cutoff <- function(lfc, c, x0, sigma) {
-    return(c * sigma / (lfc - x0))
-  }
-  
-  mirrored_function <- function(x, c, x0, sigma) {
-    ifelse(abs(x) > x0, curve_cutoff(abs(x), c, x0, sigma), NA)
-  }
-  
-  # Calculate standard deviation of log2 fold changes
-  sigma <- sd(result.volcano$estimate, na.rm = TRUE)
-  
-  # # Define constants for the curve
-  # c.95 <- 1.96 # Adjust based on your confidence interval (e.g., 1.96 for 95%)
-  # c.99 <- 2.576 # Adjust based on your confidence interval (e.g., 2.576 for 99%)
-  # x0 <- 0.5 # Minimum fold change for enriched proteins
-  # adjpCutoff <- 0.01
-  
-  # Calculate curve cutoff values
-  result.volcano$curve_cutoff_95 <- curve_cutoff(abs(result.volcano$estimate), c.95, x0, sigma)
-  result.volcano$curve_cutoff_99 <- curve_cutoff(abs(result.volcano$estimate), c.99, x0, sigma)
-  result.volcano$significant_med <- -log10(result.volcano$p.adj) > result.volcano$curve_cutoff_95 &
-    abs(result.volcano$estimate) >= x0
-  result.volcano$significant_high <- -log10(result.volcano$p.adj) > result.volcano$curve_cutoff_99 &
-    abs(result.volcano$estimate) >= x0
-  
-  #Calculate graph sizes
-  min.x <- as.integer(min(result.volcano$estimate)) - 1
-  max.x <- as.integer(max(result.volcano$estimate)) + 1
-  
-  min.y <- 0
-  max.y <- as.integer(max(-log10(result.volcano$p.adj))) + 1
-  
-  # ggplot volcano plot with specific labels
-  volcano_plot <- ggplot(result.volcano, aes(x = estimate, y = -log10(p.adj)#, label = rownames(result.volcano)
-  )) +
-    geom_point(alpha = 0.2, colour = 'grey30') +
-    stat_function(fun = function(x) mirrored_function(x, c = c.95, x0 = x0, sigma = sigma), color = "black") +
-    stat_function(fun = function(x) mirrored_function(x, c = c.99, x0 = x0, sigma = sigma), color = "blue") +
-    theme_bw() +
-    labs(title = "Volcano Plot with Curve Cutoff Based on Standard Deviation",
-         x = "Log2 Fold Change",
-         y = "-Log10 Adjusted p-value") +
-    scale_x_continuous(breaks = seq(min.x, max.x, by = 1), limits = c(min.x, max.x))+
-    scale_y_continuous(breaks = seq(min.y, max.y, by = 1), limits = c(min.y, max.y)) +
-    geom_point(data = subset(result.volcano, significant_med), aes(color = "95% C.I."), size = 2) +
-    geom_point(data = subset(result.volcano, significant_high), aes(color = "99% C.I."), size = 2)
-  
-  return(volcano_plot)
-}
-
-volcano.curve(result.volcano)
+    ###   Simple Volcano Plot - EnhancedVolcano package   ###
+    EnhancedVolcano(result.volcano, lab = rownames(result.volcano), 
+                    x = "estimate", y = "p.adj", pointSize = 3.0,
+                    FCcutoff = 0.5,  #set fold change cutoff
+                    pCutoff = 0.01   #set p.adj cutoff
+    )
+    
+    #Filter for significant proteins - Enhanced Volcano
+    sig.prt.EV <- result.volcano %>% filter(abs(estimate) > 0.5 & p.adj < 0.01) %>%
+      rownames_to_column(var = "Protein.Info")
+    
+    ###                                                  ###
+    
+    ###   Volcano plot using curvature function          ###
+    volcano.curve(result.volcano)
+    
+    #Filter for significant proteins - Curvature Volcano
+    volcano_plot.data <- volcano_plot$data %>% 
+      filter(significant_med == TRUE | significant_high == TRUE) %>%
+      rownames_to_column(var = "Protein.Info")
+    
+    ###                                                 ###
+    
+    ###   Venn Diagram Comparing Both Volcano Plots ###
+    venn.plot <- venn.diagram(
+      x = list(Set1 = sig.prt.EV$Protein.Info, Set2 = volcano_plot.data$Protein.Info),
+      category.names = c("EV", "Curve"),
+      filename = NULL,
+      output = FALSE,
+      fill = c("blue", "yellow"),
+      alpha = 0.5,
+      cex = 1.5,
+      cat.cex = 1.5,
+      cat.col = c("black", "black")
+    )
+    
+    grid.newpage()
+    grid.draw(venn.plot)
+    
+    ###                                            ###
 
 #Perform One-way ANOVA
-temp <- medNorm.log2.data %>% filter(is.finite(Log2)) %>%
-  dplyr::select(Run, Protein.Info, Condition, Log2)
-
-anova_result <- aov(Log2 ~ Condition, data = temp)  
-
-summary(anova_result)
-
-tukey_result <- TukeyHSD(anova_result)
-
-tukey_df <- as.data.frame(tukey_result$Condition) 
-
-tukey_df_sig <- filter(tukey_df, `p adj` < 0.01 ) #should contain significant comparisons
+  temp <- medNorm.log2.data %>% filter(is.finite(Log2)) %>%
+    dplyr::select(Run, Protein.Info, Condition, Log2)
+  
+  anova_result <- aov(Log2 ~ Condition, data = temp)  
+  
+  summary(anova_result)
+  
+  tukey_result <- TukeyHSD(anova_result)
+  
+  tukey_df <- as.data.frame(tukey_result$Condition) 
+  
+  tukey_df_sig <- filter(tukey_df, `p adj` < 0.01 )
 
 ############### Additional Analysis ############################################
 
