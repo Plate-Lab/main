@@ -9,8 +9,6 @@
 #Set Working Directory - unique to each system
 setwd("path/to/your/data.csv OR data.tsv/file")
 
-setwd("C:/Users/nyanc/OneDrive/Documents/All Files - personal/Work_Vandy/R_misc/Generic_MS_pipeline/Version1.0_Generic")
-
 #Goal: Analyze Mass Spectrometry Data (TMT-Labeled DDA)
 #       and perform statistical testing
 
@@ -237,8 +235,6 @@ volcano.curve <- function(result.volcano,                #function to plot curva
 #Load data files - .csv or .tsv (doesn't like .xlsx)
 raw.data <- load_file("your.data.file.csv OR .tsv")
 
-raw.data <- load_file("TMTtest_20240605_JAO_02_002_DelCANX_18plex_consensus_search2.csv")
-
 #Clean up data files
 raw.data.qc <- tmt.dda.qc(raw.data)
 
@@ -356,8 +352,6 @@ autoplot(data.prcomp, data=data.groupInfo, label= FALSE, size=4, colour = 'MS_Ru
 
 #Perform Multiple unpaired t.tests with equal variance - Visualize via Volcano Plot
 comparison <- c("treatment", "control") #define in order of [treatment - control]
-
-comparison <- c("WT,C37", "WT,delCANX")
 
 proteins.log2.long.stat <- medNorm.log2.data %>%
   dplyr::select(Run, Protein.Info, Condition, Log2) %>%
