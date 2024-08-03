@@ -638,10 +638,10 @@ proteins.log2.long.stat <- proteins.filtered %>%
   mutate(group = factor(group, levels = comparison)) %>%
   group_by(Protein.Info, group) %>% filter(n() > 2) %>% ungroup() %>%
   group_by(Protein.Info) %>% filter(n_distinct(group) == 2) %>%
-  do(tidy(t.test(Log2 ~ group, data = ., paired = FALSE, var.equal = TRUE)))
+  do(tidy(t.test(Log2 ~ group, data = ., var.equal = TRUE)))
 
 #Adjust p-values
-result.volcano <- proteins.log2.long.stat %>%
+result.volcano <- proteins.log2.long.stat %>% data.frame() %>%
   mutate(p.adj = p.adjust(p.value, method = "fdr", n = length(p.value))) %>%
   select(Protein.Info, estimate, p.adj) %>% 
   column_to_rownames(var = 'Protein.Info') %>% data.frame()

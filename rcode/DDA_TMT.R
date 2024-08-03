@@ -362,7 +362,7 @@ proteins.log2.long.stat <- medNorm.log2.data %>%
   do(tidy(t.test(Log2 ~ Condition, data = ., var.equal = TRUE)))
 
 #Adjust p-values
-result.volcano <- proteins.log2.long.stat %>%
+result.volcano <- proteins.log2.long.stat %>% data.frame() %>%
   mutate(p.adj = p.adjust(p.value, method = "fdr", n = length(p.value))) %>%
   select(Protein.Info, estimate, p.adj) %>% 
   column_to_rownames(var = 'Protein.Info') %>% data.frame()
