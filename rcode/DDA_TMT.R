@@ -11,7 +11,7 @@ setwd("path/to/your/data.csv OR data.tsv/file")
 
 setwd("C:/Users/nyanc/OneDrive/Documents/All Files - personal/Work_Vandy/R_misc/Generic_MS_pipeline/Version1.0_Generic")
 
-#Goal: Analyze Mass Spectrometry Data (TMT-Labeled DDA)
+ #Goal: Analyze Mass Spectrometry Data (TMT-Labeled DDA)
 #       and perform statistical testing
 
 #LOAD ALL FUNCTIONS AND LIBRARIES THEN START AT STEP ONE
@@ -30,12 +30,20 @@ library(ggfortify)        #Used for the PCA plot
 ### (OPTIONAL LIBRARIES) ### - Load for each optional step if desired
 library(EnhancedVolcano)  #used for EnhancedVolcano plot
 library(VennDiagram)      #used for making VennDiagrams
+library(NbClust)          ####
+library(clusterCrit)      # ^
+library(factoextra)       #Used for k-means clustering and heatmap
+library(cluster)          # V
+library(fpc)              # V
+library(pheatmap)         ####
 
 #Load functions
 load_file <- function(file){
   as.data.frame(fread(file, stringsAsFactors = FALSE))
 }                         #works with .csv and .tsv; not .xlsx
-tmt.dda.qc <- function(raw.data){
+tmt.dda.qc <- function(df){
+  
+  raw.data <- df %>% mutate(`Gene Symbol` = ifelse(`Gene Symbol` == "", NA, `Gene Symbol`))
   
   #If missing a gene name, fill in name with UniProt Accession number
   raw.data$"Gene Symbol" <- ifelse(is.na(raw.data$"Gene Symbol"),
@@ -44,9 +52,9 @@ tmt.dda.qc <- function(raw.data){
   #If there is a gene name listed in the description column
   if(any(str_detect(raw.data$Description, pattern = "GN=\\S+"))){  #if detected pattern 'GN='
     data.sorted <- raw.data %>%                                    #take our raw file
-      select(Accession, Description, "Gene Symbol",                #Select relevant columns
+      dplyr::rename(Gene_Symbol = `Gene Symbol`) %>%
+      select(Accession, Description, Gene_Symbol,                #Select relevant columns
              starts_with("Abundance:")) %>%
-      rename(Gene_Symbol = "Gene Symbol") %>%                      #rename column (easier w/o spaces)
       mutate(Gene_Symbol = (str_extract(.$Description,             #replace name with pattern found in column
                                         pattern = "GN=\\S+"))) %>%
       mutate(Gene_Symbol = str_replace(string = .$Gene_Symbol,     #get rid of 'GN='
@@ -68,15 +76,15 @@ tmt.dda.qc <- function(raw.data){
       separate_wider_delim(cols = Sample, delim = ",",             #split column at every ','
                            names = paste0("X_", 1:(max_parts)),    ### make names dynamic to fit varying size data
                            too_few = "align_start") %>%
-      rename(MS_Run = "X_1", TMT = "X_2", Condition = "X_3") %>%   #Replace column names
+      dplyr::rename(MS_Run = "X_1", TMT = "X_2", Condition = "X_3") %>%   #Replace column names
       mutate(Protein.Info = paste0(Gene_Symbol,'*',Accession)) %>% #Combine columns and separate by '*'
       select(-Gene_Symbol, -Accession)                             #remove irrelevant columns
   }
   else{                                                            #if no pattern 'GN=' detected
     data.sorted <- raw.data %>%                                    #take our raw file
+      dplyr::rename(Gene_Symbol = `Gene Symbol`) %>%
       select(Accession, Description, "Gene Symbol",                #select relevant columns
              starts_with("Abundance:")) %>%
-      rename(Gene_Symbol = "Gene Symbol") %>%                      #rename column (easier w/o spaces)
       pivot_longer(                                                #pivot longer
         cols = starts_with("Abundance:"), 
         names_to = "Sample", values_to = "Intensity") %>%
@@ -94,7 +102,7 @@ tmt.dda.qc <- function(raw.data){
       separate_wider_delim(cols = Sample, delim = ",",             #split column at every ','  
                            names = paste0("X_", 1:(max_parts)),    ### makes names dynamic to fit varying size data
                            too_few = "align_start") %>% 
-      rename(MS_Run = "X_1", TMT = "X_2", Condition = "X_3") %>%   #Replace column names
+      dplyr::rename(MS_Run = "X_1", TMT = "X_2", Condition = "X_3") %>%   #Replace column names
       mutate(Protein.Info = paste0(Gene_Symbol,'*',Accession)) %>% #Combine columns and separate by '*'
       select(-Gene_Symbol, -Accession)                             #remove irrelevant columns
   }
@@ -105,7 +113,7 @@ tmt.dda.qc <- function(raw.data){
     unite("Condition", Condition, starts_with("X_"),               #Combine condition columns into single
           sep = ",", remove = TRUE) %>%
     filter(!str_detect(Protein.Info, 
-                       regex("contaminant|cont|Contaminant|Cont")))                 #remove any proteins that are listed as contaminant
+                       regex("contaminant|cont|Contaminant|Cont")))#remove any proteins that are listed as contaminant
   
   after <- length(unique(raw.data.sorted$Protein.Info))            #store size for comparison
   
@@ -114,7 +122,7 @@ tmt.dda.qc <- function(raw.data){
   cat("\nRemoved", removed, "% of the data due to:\n identified as contaminant.\n")
   
   raw.data.sorted <- raw.data.sorted %>% mutate_at(vars(2:ncol(.)), ~ str_replace_all(., "\\s+", "")) %>%
-    mutate(Intensity = as.numeric(Intensity))
+    mutate(Intensity = as.numeric(Intensity)) %>% filter(!is.na(Intensity))
   
 }                    #import PD / TMT file and apply quality control filters
 medNorm <- function(df, samples = Run, 
@@ -227,7 +235,8 @@ volcano.curve <- function(result.volcano,                #function to plot curva
     scale_x_continuous(breaks = seq(min.x, max.x, by = 1), limits = c(min.x, max.x))+
     scale_y_continuous(breaks = seq(min.y, max.y, by = 1), limits = c(min.y, max.y)) +
     geom_point(data = subset(result.volcano, significant_med), aes(color = "med-conf"), size = 2) +
-    geom_point(data = subset(result.volcano, significant_high), aes(color = "high-conf"), size = 2)
+    geom_point(data = subset(result.volcano, significant_high), aes(color = "high-conf"), size = 2) +
+    geom_text_repel(data = subset(result.volcano, significant_med), aes(label = Protein), size = 3)
   
   return(volcano_plot)
 } #Define adj.p-value cutoff
@@ -307,13 +316,15 @@ ggplot(medNorm.log2.data, aes(x= Condition, y=Log2, fill= TMT)) +
 
 #Barplot 1 - Unique Protein IDs Identified per Sample
 protein.count <- medNorm.log2.data %>% na.omit() %>% info.group()
+protein.count.info <-medNorm.log2.data %>% dplyr::select(Run, MS_Run) %>% 
+  distinct() %>% inner_join(protein.count, by = "Run")
 
-ggplot(protein.count, aes(x= Run, y=Count)) +
+ggplot(protein.count.info, aes(x= Run, y=Count, fill = MS_Run)) +
   geom_col()+
   labs(title= "Unique Protein IDs Identified per Sample", 
        x= "Sample",
        y= "Count") +
-  theme(axis.text.x= element_text(angle = 45, hjust =1), legend.position = "none")
+  theme(axis.text.x= element_text(angle = 45, hjust =1))
 
 #PCA Plot
 data <- medNorm.log2.data %>% filter(is.finite(Log2)) %>%
@@ -367,13 +378,17 @@ proteins.log2.long.stat <- medNorm.log2.data %>%
 result.volcano <- proteins.log2.long.stat %>% data.frame() %>%
   mutate(p.adj = p.adjust(p.value, method = "fdr", n = length(p.value))) %>%
   select(Protein.Info, estimate, p.adj) %>% 
-  column_to_rownames(var = 'Protein.Info') %>% data.frame()
+  #column_to_rownames(var = 'Protein.Info') %>% 
+  separate_wider_delim(cols = "Protein.Info", names = c("Protein", "Accession"), delim = "*") %>%
+  data.frame()
 
     ###   Simple Volcano Plot - EnhancedVolcano package   ###
-    EnhancedVolcano(result.volcano, lab = rownames(result.volcano), 
+    EnhancedVolcano(result.volcano, lab = result.volcano$Protein, 
                     x = "estimate", y = "p.adj", pointSize = 3.0,
-                    FCcutoff = 0.5,  #set fold change cutoff
-                    pCutoff = 0.01   #set p.adj cutoff
+                    FCcutoff = 0.5,   #set fold change cutoff
+                    pCutoff = 0.01,   #set p.adj cutoff
+                    xlim = c((min(result.volcano$estimate)-0.5), abs(min(result.volcano$estimate)-0.5)),
+                    ylim = c(0, (max(-log10(result.volcano$p.adj))+0.5))
     )
     
     #Filter for significant proteins - Enhanced Volcano
@@ -473,14 +488,7 @@ Avg.FC.log2 %>%
        x = "Log2 Fold Change",
        y = "-Log10 Adjusted p-value")
 
-
 #Clustering (Using K-Means Clustering)
-library(NbClust)
-library(clusterCrit)
-library(factoextra)
-library(cluster)
-library(fpc)
-library(pheatmap)
 
   #Copy the data
   clusterDF <- Avg.FC.log2
@@ -536,11 +544,11 @@ library(pheatmap)
 
   # Create the heatmap
   set.seed(52)   
-  pheatmap.kmean<-pheatmap(d, kmeans_k = clusAmount, cluster_rows = TRUE, cluster_cols = FALSE,
+  pheatmap.kmean<-pheatmap(clusterDF.mean, kmeans_k = clusAmount, cluster_rows = TRUE, cluster_cols = FALSE,
                            clustering_method = "complete",  # You can change the method as needed
                            cutree_rows = 1,  # Number of clusters for rows, estimated from dendrogram above
                            main = "Heatmap of Proteins with Hierarchical Clustering using K-means", 
-                           labels_row = d$Protein.Group,
+                           labels_row = clusterDF.mean$Protein.Group,
                            color = hcl.colors(50, "Temps"), fontsize_row = 10, display_numbers = TRUE)
   
   cluster.values <- pheatmap.kmean$kmeans$cluster %>% data.frame() %>% rownames_to_column() %>%
