@@ -432,7 +432,8 @@ volcano.curve <- function(result.volcano,                #function to plot curva
     scale_x_continuous(breaks = seq(min.x, max.x, by = 1), limits = c(min.x, max.x))+
     scale_y_continuous(breaks = seq(min.y, max.y, by = 1), limits = c(min.y, max.y)) +
     geom_point(data = subset(result.volcano, significant_med), aes(color = "med-conf"), size = 2) +
-    geom_point(data = subset(result.volcano, significant_high), aes(color = "high-conf"), size = 2)
+    geom_point(data = subset(result.volcano, significant_high), aes(color = "high-conf"), size = 2) +
+    geom_text_repel(data = subset(result.volcano, significant_med), aes(label = Protein), size = 3)
   
   return(volcano_plot)
 } #Define adj.p-value cutoff
@@ -491,8 +492,8 @@ proteins.medNorm <- max_LFQ(peptides.medNorm, values = "Norm_abundance")
     ### (OPTIONAL) Calculate Sequence Coverage for each Protein per Run [~5min.]  ###
     
     #Define species list and proteome directory
-    species.list<-c("Homo sapiens")                          #define species
-    dir<-"Human_uniprotkb_reviewed_2024_05_01.fasta"         #input UniProt fasta file name
+    species.list<-c("Genus species")       #define species
+    dir<-"your.UniProt.file.fasta"         #input UniProt fasta file name
     
     #Run functions
     digest.one.species(species.list, dir)
@@ -605,7 +606,7 @@ ggplot(protein.count, aes(x= Run, y=Count, fill = group)) +
   sample_names <- data.t %>% rownames()
   
   #Run the PCA analysis
-  data.prcomp <- data.t %>% select(where(~ var(.) != 0))  #select columns without zero variance
+  data.prcomp <- data.t %>% select(where(~ var(.) != 0)) %>%   #select columns without zero variance
     prcomp(scale = TRUE)
   
   #Label our samples with their treatment groups
@@ -644,18 +645,22 @@ proteins.log2.long.stat <- proteins.filtered %>%
 result.volcano <- proteins.log2.long.stat %>% data.frame() %>%
   mutate(p.adj = p.adjust(p.value, method = "fdr", n = length(p.value))) %>%
   select(Protein.Info, estimate, p.adj) %>% 
-  column_to_rownames(var = 'Protein.Info') %>% data.frame()
+  #column_to_rownames(var = 'Protein.Info') %>% 
+  separate_wider_delim(cols = "Protein.Info", names = c("Protein", "Accession"), delim = "*") %>%
+  data.frame()
 
     ###   Simple Volcano Plot - EnhancedVolcano package   ###
-    EnhancedVolcano(result.volcano, lab = rownames(result.volcano), 
+    EnhancedVolcano(result.volcano, lab = result.volcano$Protein, 
                     x = "estimate", y = "p.adj", pointSize = 3.0,
-                    FCcutoff = 0.5,  #set fold change cutoff
-                    pCutoff = 0.01   #set p.adj cutoff
+                    FCcutoff = 0.5,   #set fold change cutoff
+                    pCutoff = 0.01,   #set p.adj cutoff
+                    xlim = c((min(result.volcano$estimate)-0.5), abs(min(result.volcano$estimate)-0.5)),
+                    ylim = c(0, (max(-log10(result.volcano$p.adj))+0.5))
     )
     
     #Filter for significant proteins - Enhanced Volcano
-    sig.prt.EV <- result.volcano %>% filter(abs(estimate) > 0.5 & p.adj < 0.01) %>%
-      rownames_to_column(var = "Protein.Info")
+    sig.prt.EV <- result.volcano %>% filter(abs(estimate) > 0.5 & p.adj < 0.01)# %>%
+      #rownames_to_column(var = "Protein.Info")
     
     ###                                                  ###
     
@@ -664,14 +669,14 @@ result.volcano <- proteins.log2.long.stat %>% data.frame() %>%
     
     #Filter for significant proteins - Curvature Volcano
     volcano_plot.data <- volcano_plot$data %>% 
-      filter(significant_med == TRUE | significant_high == TRUE) %>%
-      rownames_to_column(var = "Protein.Info")
+      filter(significant_med == TRUE | significant_high == TRUE)# %>%
+      #rownames_to_column(var = "Protein.Info")
     
     ###                                                 ###
     
     ###   Venn Diagram Comparing Both Volcano Plots ###
     venn.plot <- venn.diagram(
-      x = list(Set1 = sig.prt.EV$Protein.Info, Set2 = volcano_plot.data$Protein.Info),
+      x = list(Set1 = sig.prt.EV$Protein, Set2 = volcano_plot.data$Protein),
       category.names = c("EV", "Curve"),
       filename = NULL,
       output = FALSE,
@@ -790,20 +795,20 @@ result.volcano <- proteins.log2.long.stat %>% data.frame() %>%
   
   silhouttePlot <- ggplot(df.silMean, aes(x = k, y = means)) +
     geom_line() +
-    theme_classic() + labs(title = "Average of 100 Silhouette Scores")
+    theme_classic() + labs(title = "Average of 20 Silhouette Scores")
   silhouttePlot
   #############################################################################
   
   #Change clusAmount to be the amount of clusters you decide on, based on the above plots
-  clusAmount = 10 
+  clusAmount = 10
 
   # Create the heatmap
   set.seed(52)   
-  pheatmap.kmean<-pheatmap(d, kmeans_k = clusAmount, cluster_rows = TRUE, cluster_cols = FALSE,
+  pheatmap.kmean<-pheatmap(clusterDF.mean, kmeans_k = clusAmount, cluster_rows = TRUE, cluster_cols = FALSE,
                            clustering_method = "complete",  # You can change the method as needed
                            cutree_rows = 1,  # Number of clusters for rows, estimated from dendrogram above
                            main = "Heatmap of Proteins with Hierarchical Clustering using K-means", 
-                           labels_row = d$Protein.Group,
+                           labels_row = clusterDF.mean$Protein.Group,
                            color = hcl.colors(50, "Temps"), fontsize_row = 10, display_numbers = TRUE)
   
   cluster.values <- pheatmap.kmean$kmeans$cluster %>% data.frame() %>% rownames_to_column() %>%
