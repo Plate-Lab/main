@@ -9,9 +9,7 @@
 #Set Working Directory - unique to each system
 setwd("path/to/your/data.csv OR data.tsv/file")
 
-setwd("C:/Users/nyanc/OneDrive/Documents/All Files - personal/Work_Vandy/R_misc/Generic_MS_pipeline/Version1.0_Generic")
-
- #Goal: Analyze Mass Spectrometry Data (TMT-Labeled DDA)
+#Goal: Analyze Mass Spectrometry Data (TMT-Labeled DDA)
 #       and perform statistical testing
 
 #LOAD ALL FUNCTIONS AND LIBRARIES THEN START AT STEP ONE
