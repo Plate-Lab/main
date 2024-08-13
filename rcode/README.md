@@ -2,8 +2,8 @@
 This folder contains the Plate Lab's commonly-used R code. We currently have two pipelines in R for the analysis and visualization of both DDA/TMT and DIA LC-MS/MS data.
 
 ## Pipelines
- - [DIA](DIA_v1.0.R)
- - [DDA TMT](DDA_TMT_v1.0.R)
+ - [DIA](DIA.R)
+ - [DDA TMT](DDA_TMT.R)
 
 ### General Workflow
 1. Load data file

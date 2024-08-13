@@ -2,6 +2,8 @@
 
 # MS Proteomics Pipeline - DDA TMT-Labeled
 
+#Version 1.1 - Released August 13th, 2024
+
 #Written by Sarah Garcia, Lea Barny, Jake Hermanson - 2024
 
 #Set Working Directory - unique to each system
@@ -21,14 +23,25 @@ setwd("path/to/your/data.csv OR data.tsv/file")
 library(tidyverse)        #used in almost every function
 library(data.table)       #used in almost every function
 library(broom)            #Used for t.tests
-library(EnhancedVolcano)  #Fancy Volcano plot package
 library(ggfortify)        #Used for the PCA plot
+
+### (OPTIONAL LIBRARIES) ### - Load for each optional step if desired
+library(EnhancedVolcano)  #used for EnhancedVolcano plot
+library(VennDiagram)      #used for making VennDiagrams
+library(NbClust)          ####
+library(clusterCrit)      # ^
+library(factoextra)       #Used for k-means clustering and heatmap
+library(cluster)          # V
+library(fpc)              # V
+library(pheatmap)         ####
 
 #Load functions
 load_file <- function(file){
   as.data.frame(fread(file, stringsAsFactors = FALSE))
 }                         #works with .csv and .tsv; not .xlsx
-tmt.dda.qc <- function(raw.data){
+tmt.dda.qc <- function(df){
+  
+  raw.data <- df %>% mutate(`Gene Symbol` = ifelse(`Gene Symbol` == "", NA, `Gene Symbol`))
   
   #If missing a gene name, fill in name with UniProt Accession number
   raw.data$"Gene Symbol" <- ifelse(is.na(raw.data$"Gene Symbol"),
@@ -37,9 +50,9 @@ tmt.dda.qc <- function(raw.data){
   #If there is a gene name listed in the description column
   if(any(str_detect(raw.data$Description, pattern = "GN=\\S+"))){  #if detected pattern 'GN='
     data.sorted <- raw.data %>%                                    #take our raw file
-      select(Accession, Description, "Gene Symbol",                #Select relevant columns
+      dplyr::rename(Gene_Symbol = `Gene Symbol`) %>%
+      select(Accession, Description, Gene_Symbol,                #Select relevant columns
              starts_with("Abundance:")) %>%
-      rename(Gene_Symbol = "Gene Symbol") %>%                      #rename column (easier w/o spaces)
       mutate(Gene_Symbol = (str_extract(.$Description,             #replace name with pattern found in column
                                         pattern = "GN=\\S+"))) %>%
       mutate(Gene_Symbol = str_replace(string = .$Gene_Symbol,     #get rid of 'GN='
@@ -61,15 +74,14 @@ tmt.dda.qc <- function(raw.data){
       separate_wider_delim(cols = Sample, delim = ",",             #split column at every ','
                            names = paste0("X_", 1:(max_parts)),    ### make names dynamic to fit varying size data
                            too_few = "align_start") %>%
-      rename(MS_Run = "X_1", TMT = "X_2", Condition = "X_3") %>%   #Replace column names
+      dplyr::rename(MS_Run = "X_1", TMT = "X_2", Condition = "X_3") %>%   #Replace column names
       mutate(Protein.Info = paste0(Gene_Symbol,'*',Accession)) %>% #Combine columns and separate by '*'
       select(-Gene_Symbol, -Accession)                             #remove irrelevant columns
-  }
-  else{                                                            #if no pattern 'GN=' detected
+  }else{                                                            #if no pattern 'GN=' detected
     data.sorted <- raw.data %>%                                    #take our raw file
-      select(Accession, Description, "Gene Symbol",                #select relevant columns
+      dplyr::rename(Gene_Symbol = `Gene Symbol`) %>%
+      select(Accession, Description, Gene_Symbol,                #select relevant columns
              starts_with("Abundance:")) %>%
-      rename(Gene_Symbol = "Gene Symbol") %>%                      #rename column (easier w/o spaces)
       pivot_longer(                                                #pivot longer
         cols = starts_with("Abundance:"), 
         names_to = "Sample", values_to = "Intensity") %>%
@@ -87,43 +99,29 @@ tmt.dda.qc <- function(raw.data){
       separate_wider_delim(cols = Sample, delim = ",",             #split column at every ','  
                            names = paste0("X_", 1:(max_parts)),    ### makes names dynamic to fit varying size data
                            too_few = "align_start") %>% 
-      rename(MS_Run = "X_1", TMT = "X_2", Condition = "X_3") %>%   #Replace column names
+      dplyr::rename(MS_Run = "X_1", TMT = "X_2", Condition = "X_3") %>%   #Replace column names
       mutate(Protein.Info = paste0(Gene_Symbol,'*',Accession)) %>% #Combine columns and separate by '*'
       select(-Gene_Symbol, -Accession)                             #remove irrelevant columns
   }
   
+  before <- length(unique(data.sorted$Protein.Info))               #store size for comparison
+  
   raw.data.sorted <- data.sorted %>%                               #Take our almost-finished file
-    filter(!str_detect(Protein.Info, "contaminant"))               #remove any proteins that are listed as contaminant
+    unite("Condition", Condition, starts_with("X_"),               #Combine condition columns into single
+          sep = ",", remove = TRUE) %>%
+    filter(!str_detect(Protein.Info, 
+                       regex("contaminant|cont|Contaminant|Cont")))#remove any proteins that are listed as contaminant
+  
+  after <- length(unique(raw.data.sorted$Protein.Info))            #store size for comparison
+  
+  removed <- (1-(after/before))*100                                #get size comparison
+  
+  cat("\nRemoved", removed, "% of the data due to:\n identified as contaminant.\n")
+  
+  raw.data.sorted <- raw.data.sorted %>% mutate_at(vars(2:ncol(.)), ~ str_replace_all(., "\\s+", "")) %>%
+    mutate(Intensity = as.numeric(Intensity)) %>% filter(!is.na(Intensity))
   
 }                    #import PD / TMT file and apply quality control filters
-filter.NA <- function(df, points = 3){
-  
-  test <- list()                                         #initialize empty list
-  
-  df.wide <- df %>% pivot_wider(                         #take the data.frame, pivot wider
-    names_from = 'Run', 
-    values_from = 'Precursor.Normalised'
-  )
-  
-  for(i in treatments){                                  #for each treatment specified
-    sample.number <- df.wide %>%                         #take our wide data.frame
-      dplyr::select(Protein.Info,                        #select treatment columns
-                    Precursor.Id, ends_with(i)
-      ) %>% ncol(.)-2                      #store number of treatment columns
-    NA.amount <- sample.number - points                  #number of treatment columns minus minimum number of points
-    test[[i]] <- df.wide %>%                             #take our wide data.frame
-      dplyr::select(Protein.Info, Precursor.Id,          #select treatment columns  
-                    ends_with(i)) %>% 
-      filter(rowSums(is.na(.)) <= NA.amount)             #filter for columns that meet the criteria
-  }
-  
-  combined_df <- Reduce(function(x, y) full_join(x, y, by = c("Precursor.Id", "Protein.Info")), test)
-  sample.amount <- ncol(combined_df) - 2
-  combined_df_filter <- combined_df %>% unique() %>% filter(rowSums(is.na(.)) < sample.amount) %>%
-    pivot_longer(cols = 3:ncol(.), names_to = "Run", values_to = "Precursor.Normalised") %>%
-    filter(Precursor.Normalised != 0) %>%
-    inner_join(df, by = c("Protein.Info", "Run", "Precursor.Id", "Precursor.Normalised"))
-}               #filter for minimum # of points per observation
 medNorm <- function(df, samples = Run, 
                     values = Precursor.Normalised) { 
   df %>% data.frame() %>%                                #take your specified data.frame
@@ -152,9 +150,11 @@ filter.NA <- function(df, points = 3){
   
   df_subset <- df %>% dplyr::select(Run, Protein.Info, Intensity)
   
-  df.wide <- df_subset %>% pivot_wider(                         #take the data.frame, pivot wider
+  df.wide <- df_subset %>% data.frame() %>%
+    pivot_wider(                         #take the data.frame, pivot wider
     names_from = 'Run', 
-    values_from = 'Intensity'
+    values_from = 'Intensity',
+    values_fn = list(Intensity = median) #if there are any list-cols present, the median will be taken
   )
   
   for(i in treatments){                                  #for each treatment specified
@@ -187,6 +187,59 @@ average.FC <- function(data){
   Avg.FC.log2 <- test %>% purrr::reduce(full_join, by = "Protein.Info")
 }                        #function to calculate treatment avg.Log2FC
 
+### (OPTIONAL FUNCTIONS) ### - Load for each optional step if desired
+volcano.curve <- function(result.volcano,                #function to plot curvature volcano
+                          c.95 = 0.4,             #Define curvature
+                          c.99 = 0.8,             #Define high-confidence curvature
+                          x0 = 0.5,               #Define minimum fold change
+                          adjpCutoff = 0.01){
+  
+  #adding curve cutoff
+  curve_cutoff <- function(lfc, c, x0, sigma) {
+    return(c * sigma / (lfc - x0))
+  }
+  
+  mirrored_function <- function(x, c, x0, sigma) {
+    ifelse(abs(x) > x0, curve_cutoff(abs(x), c, x0, sigma), NA)
+  }
+  
+  # Calculate standard deviation of log2 fold changes
+  sigma <- sd(result.volcano$estimate, na.rm = TRUE)
+  
+  # Calculate curve cutoff values
+  result.volcano$curve_cutoff_95 <- curve_cutoff(abs(result.volcano$estimate), c.95, x0, sigma)
+  result.volcano$curve_cutoff_99 <- curve_cutoff(abs(result.volcano$estimate), c.99, x0, sigma)
+  result.volcano$significant_med <- -log10(result.volcano$p.adj) > result.volcano$curve_cutoff_95 &
+    abs(result.volcano$estimate) >= x0
+  result.volcano$significant_high <- -log10(result.volcano$p.adj) > result.volcano$curve_cutoff_99 &
+    abs(result.volcano$estimate) >= x0
+  
+  #Calculate graph sizes
+  min.x <- as.integer(min(result.volcano$estimate, na.rm = TRUE)) - 1
+  max.x <- as.integer(max(result.volcano$estimate, na.rm = TRUE)) + 1
+  
+  min.y <- 0
+  max.y <- as.integer(max(-log10(result.volcano$p.adj), na.rm = TRUE)) + 1
+  
+  # ggplot volcano plot with specific labels
+  volcano_plot <<- ggplot(result.volcano, aes(x = estimate, y = -log10(p.adj)#, label = rownames(result.volcano)
+  )) +
+    geom_point(alpha = 0.2, colour = 'grey30') +
+    stat_function(fun = function(x) mirrored_function(x, c = c.95, x0 = x0, sigma = sigma), color = "black") +
+    stat_function(fun = function(x) mirrored_function(x, c = c.99, x0 = x0, sigma = sigma), color = "blue") +
+    theme_bw() +
+    labs(title = "Volcano Plot with Curve Cutoff Based on Standard Deviation",
+         x = "Log2 Fold Change",
+         y = "-Log10 Adjusted p-value") +
+    scale_x_continuous(breaks = seq(min.x, max.x, by = 1), limits = c(min.x, max.x))+
+    scale_y_continuous(breaks = seq(min.y, max.y, by = 1), limits = c(min.y, max.y)) +
+    geom_point(data = subset(result.volcano, significant_med), aes(color = "med-conf"), size = 2) +
+    geom_point(data = subset(result.volcano, significant_high), aes(color = "high-conf"), size = 2) +
+    geom_text_repel(data = subset(result.volcano, significant_med), aes(label = Protein), size = 3)
+  
+  return(volcano_plot)
+} #Define adj.p-value cutoff
+
 ############### Step One: Input and Reformat Data ##############################
 
 #Load data files - .csv or .tsv (doesn't like .xlsx)
@@ -195,11 +248,17 @@ raw.data <- load_file("your.data.file.csv OR .tsv")
 #Clean up data files
 raw.data.qc <- tmt.dda.qc(raw.data)
 
+#Store Sample Treatments
+treatments <- unique(raw.data.qc$Condition)
+
+#Optional Filtering (points = 1 for removal of only NA rows)
+raw.data.qc.filtered <- filter.NA(raw.data.qc, points = 1)
+
 ### Visualization ###
 
 #Boxplot 1 - Raw abundances across TMT labels grouped by treatment or TMT Label
-ggplot(raw.data.qc, aes(x= TMT, y=Intensity, fill= Condition)) +
-  geom_hline(yintercept = median(raw.data.qc$Intensity, na.rm = TRUE),  #this adds a line at the global median
+ggplot(raw.data.qc.filtered, aes(x= TMT, y=Intensity, fill= Condition)) +
+  geom_hline(yintercept = median(raw.data.qc.filtered$Intensity, na.rm = TRUE),  #this adds a line at the global median
              color = "red4", linetype = "solid", size = 1) +
   geom_boxplot() +
   labs(title= "Distribution of Values Grouped by Treatment", 
@@ -210,8 +269,8 @@ ggplot(raw.data.qc, aes(x= TMT, y=Intensity, fill= Condition)) +
   facet_grid(cols = vars(Condition), scales = "free_x")
 
 #Same plot, grouped instead by TMT Label 
-ggplot(raw.data.qc, aes(x= Condition, y=Intensity, fill= TMT)) +
-  geom_hline(yintercept = median(raw.data.qc$Intensity, na.rm = TRUE), #this adds a line at the global median
+ggplot(raw.data.qc.filtered, aes(x= Condition, y=Intensity, fill= TMT)) +
+  geom_hline(yintercept = median(raw.data.qc.filtered$Intensity, na.rm = TRUE), #this adds a line at the global median
              color = "red4", linetype = "solid", size = 1) +
   geom_boxplot()+ 
   labs(title= "Distribution of Values Grouped by TMT Label", 
@@ -220,13 +279,6 @@ ggplot(raw.data.qc, aes(x= Condition, y=Intensity, fill= TMT)) +
   scale_y_log10() +
   theme(axis.text.x= element_text(angle = 45, hjust =1), legend.position = "none") +
   facet_grid(cols = vars(TMT), scales = "free_x")
-
-
-#Store Sample Treatments
-treatments <- unique(raw.data.qc$Condition)
-
-#Optional Filtering (points = 1 for removal of only NA rows)
-raw.data.qc.filtered <- filter.NA(raw.data.qc, points = 1)
 
 ############## Step Two: Normalization #########################################
 
@@ -263,13 +315,15 @@ ggplot(medNorm.log2.data, aes(x= Condition, y=Log2, fill= TMT)) +
 
 #Barplot 1 - Unique Protein IDs Identified per Sample
 protein.count <- medNorm.log2.data %>% na.omit() %>% info.group()
+protein.count.info <-medNorm.log2.data %>% dplyr::select(Run, MS_Run) %>% 
+  distinct() %>% inner_join(protein.count, by = "Run")
 
-ggplot(protein.count, aes(x= Run, y=Count)) +
+ggplot(protein.count.info, aes(x= Run, y=Count, fill = MS_Run)) +
   geom_col()+
   labs(title= "Unique Protein IDs Identified per Sample", 
        x= "Sample",
        y= "Count") +
-  theme(axis.text.x= element_text(angle = 45, hjust =1), legend.position = "none")
+  theme(axis.text.x= element_text(angle = 45, hjust =1))
 
 #PCA Plot
 data <- medNorm.log2.data %>% filter(is.finite(Log2)) %>%
@@ -297,8 +351,8 @@ data.groupInfo <- data %>%
   rownames_to_column(var = "Run") %>%
   inner_join(sample_groups, by = "Run")
 
-#Plot the PCA analysis
-autoplot(data.prcomp, data=data.groupInfo, label= FALSE, size=4, colour = 'Condition') +
+#Plot the PCA analysis - change 'colour' to grouping variable (MS_Run, Condition, etc.)
+autoplot(data.prcomp, data=data.groupInfo, label= TRUE, size=4, colour = 'MS_Run') +
   theme(axis.title.x = element_text(size = 12), axis.title.y = element_text(size = 12)) +
   labs(title = "A. Principal Component Analysis Plot")
 
@@ -308,117 +362,95 @@ autoplot(data.prcomp, data=data.groupInfo, label= FALSE, size=4, colour = 'Condi
 # Multiple t.tests w/ p.adj(method = "fdr")  -  For comparison of 2 groups
 # ANOVA / Mixed Model  -  For comparison of >= 3 groups
 
-#Perform Multiple unpaired t.tests with equal variance - Visualize via Volcano Plot [Ex. DIA]
-comparison <- c(" treatment", " control") #define in order of [treatment - control]
+  # #If needed, use these lines to separate the "Condition" column into individual pieces for statistical testing
+  # medNorm.log2.data.sep <- medNorm.log2.data %>% 
+  #   separate_wider_delim(cols = Condition, names = c("Condition", "Condition_1"), delim = ",") #add more columns if needed
 
-proteins.log2.A.long.stat <- medNorm.log2.data %>%
+#Perform Multiple unpaired t.tests with equal variance - Visualize via Volcano Plot
+comparison <- c("treatment", "control") #define in order of [treatment - control]
+
+#Filter for specified comparison and perform t.tests
+proteins.log2.long.stat <- medNorm.log2.data %>% data.frame() %>%
   dplyr::select(Run, Protein.Info, Condition, Log2) %>%
   filter(Condition %in% comparison) %>%
   mutate(Condition = factor(Condition, levels = comparison)) %>%
-  group_by(Protein.Info, Condition) %>% filter(n() > 2) %>% ungroup() %>%
+  group_by(Protein.Info, Condition) %>% filter(n() >= 2) %>% 
+  
+  #Note: Default is minimum 3 points present in both groups for t.test. [filter(n() >= 3)]
+  #However, R allows a minimum of 2 points to output a p.value. [filter(n() >= 2)]
+  #Change at your own discretion.
+  
+  ungroup() %>%
   group_by(Protein.Info) %>% filter(n_distinct(Condition) == 2) %>%
-  do(tidy(t.test(Log2 ~ Condition, data = ., paired = FALSE, var.equal = TRUE)))
+  do(tidy(t.test(Log2 ~ Condition, data = ., var.equal = TRUE)))
 
 #Adjust p-values
-result.volcano <- proteins.log2.A.long.stat %>%
-  mutate(p.adj = p.adjust(p.value, method = "fdr", n = length(p.value))) %>%
+result.volcano <- proteins.log2.long.stat %>% data.frame() %>%
+  mutate(p.adj = p.adjust(p.value, method = "fdr")) %>%
   select(Protein.Info, estimate, p.adj) %>% 
-  separate_wider_delim(cols = "Protein.Info", delim = '*', names = c("Protein", "Accession")) %>%
-  select(-Accession) %>% mutate(Protein = paste0(1:nrow(.), '-', Protein)) %>%
-  column_to_rownames(var = 'Protein') %>% data.frame()
+  separate_wider_delim(cols = "Protein.Info", names = c("Protein", "Accession"), delim = "*") %>%
+  data.frame()
 
-#Simple Volcano Plot - EnhancedVolcano package
-library(EnhancedVolcano)
-
-proteins.log2.A.long.stat %>%
-  mutate(p.adj = p.adjust(p.value, method = "fdr", n = length(p.value))) %>%
-  select(Protein.Info, estimate, p.adj) %>% 
-  separate_wider_delim(cols = "Protein.Info", delim = '*', names = c("Protein", "Accession")) %>%
-  select(-Accession) %>% mutate(Protein = paste0(1:nrow(.), '-', Protein)) %>%
-  column_to_rownames(var = 'Protein') %>% data.frame() %>%
-  EnhancedVolcano(lab = rownames(.), x = "estimate", y = "p.adj", pointSize = 3.0,
-                  FCcutoff = 0.5,  #set fold change cutoff
-                  pCutoff = 0.01   #set p.adj cutoff
-  )
-
-#Volcano plot using curvature function
-volcano.curve <- function(result.volcano, 
-                          c.95 = 1.96,        #Define curvature
-                          c.99 = 2.576,       #Define high-confidence curvature
-                          x0 = 0.5,           #Define minimum fold change
-                          adjpCutoff = 0.01   #Define adj.p-value cutoff
-){
-  
-  #adding curve cutoff
-  curve_cutoff <- function(lfc, c, x0, sigma) {
-    return(c * sigma / (lfc - x0))
-  }
-  
-  mirrored_function <- function(x, c, x0, sigma) {
-    ifelse(abs(x) > x0, curve_cutoff(abs(x), c, x0, sigma), NA)
-  }
-  
-  # Calculate standard deviation of log2 fold changes
-  sigma <- sd(result.volcano$estimate, na.rm = TRUE)
-  
-  # # Define constants for the curve
-  # c.95 <- 1.96 # Adjust based on your confidence interval (e.g., 1.96 for 95%)
-  # c.99 <- 2.576 # Adjust based on your confidence interval (e.g., 2.576 for 99%)
-  # x0 <- 0.5 # Minimum fold change for enriched proteins
-  # adjpCutoff <- 0.01
-  
-  # Calculate curve cutoff values
-  result.volcano$curve_cutoff_95 <- curve_cutoff(abs(result.volcano$estimate), c.95, x0, sigma)
-  result.volcano$curve_cutoff_99 <- curve_cutoff(abs(result.volcano$estimate), c.99, x0, sigma)
-  result.volcano$significant_med <- -log10(result.volcano$p.adj) > result.volcano$curve_cutoff_95 &
-    abs(result.volcano$estimate) >= x0
-  result.volcano$significant_high <- -log10(result.volcano$p.adj) > result.volcano$curve_cutoff_99 &
-    abs(result.volcano$estimate) >= x0
-  
-  #Calculate graph sizes
-  min.x <- as.integer(min(result.volcano$estimate)) - 1
-  max.x <- as.integer(max(result.volcano$estimate)) + 1
-  
-  min.y <- 0
-  max.y <- as.integer(max(-log10(result.volcano$p.adj))) + 1
-  
-  # ggplot volcano plot with specific labels
-  volcano_plot <- ggplot(result.volcano, aes(x = estimate, y = -log10(p.adj)#, label = rownames(result.volcano)
-  )) +
-    geom_point(alpha = 0.2, colour = 'grey30') +
-    stat_function(fun = function(x) mirrored_function(x, c = c.95, x0 = x0, sigma = sigma), color = "black") +
-    stat_function(fun = function(x) mirrored_function(x, c = c.99, x0 = x0, sigma = sigma), color = "blue") +
-    theme_bw() +
-    labs(title = "Volcano Plot with Curve Cutoff Based on Standard Deviation",
-         x = "Log2 Fold Change",
-         y = "-Log10 Adjusted p-value") +
-    scale_x_continuous(breaks = seq(min.x, max.x, by = 1), limits = c(min.x, max.x))+
-    scale_y_continuous(breaks = seq(min.y, max.y, by = 1), limits = c(min.y, max.y)) +
-    geom_point(data = subset(result.volcano, significant_med), aes(color = "95% C.I."), size = 2) +
-    geom_point(data = subset(result.volcano, significant_high), aes(color = "99% C.I."), size = 2)
-  
-  return(volcano_plot)
-}
-
-volcano.curve(result.volcano)
+    ###   Simple Volcano Plot - EnhancedVolcano package   ###
+    EnhancedVolcano(result.volcano, lab = result.volcano$Protein, 
+                    x = "estimate", y = "p.adj", pointSize = 3.0,
+                    FCcutoff = 0.5,   #set fold change cutoff
+                    pCutoff = 0.01,   #set p.adj cutoff
+                    xlim = c((min(result.volcano$estimate)-0.5), abs(min(result.volcano$estimate)-0.5)),
+                    ylim = c(0, (max(-log10(result.volcano$p.adj))+0.5))
+    )
+    
+    #Filter for significant proteins - Enhanced Volcano
+    sig.prt.EV <- result.volcano %>% filter(abs(estimate) > 0.5 & p.adj < 0.01) %>%
+      rownames_to_column(var = "Protein.Info")
+    
+    ###                                                  ###
+    
+    ###   Volcano plot using curvature function          ###
+    volcano.curve(result.volcano)
+    
+    #Filter for significant proteins - Curvature Volcano
+    volcano_plot.data <- volcano_plot$data %>% 
+      filter(significant_med == TRUE | significant_high == TRUE) %>%
+      rownames_to_column(var = "Protein.Info")
+    
+    ###                                                 ###
+    
+    ###   Venn Diagram Comparing Both Volcano Plots ###
+    venn.plot <- venn.diagram(
+      x = list(Set1 = sig.prt.EV$Protein.Info, Set2 = volcano_plot.data$Protein.Info),
+      category.names = c("EV", "Curve"),
+      filename = NULL,
+      output = FALSE,
+      fill = c("blue", "yellow"),
+      alpha = 0.5,
+      cex = 1.5,
+      cat.cex = 1.5,
+      cat.col = c("black", "black")
+    )
+    
+    grid.newpage()
+    grid.draw(venn.plot)
+    
+    ###                                            ###
 
 #Perform One-way ANOVA
-temp <- medNorm.log2.data %>% filter(is.finite(Log2)) %>%
-  dplyr::select(Run, Protein.Info, Condition, Log2)
-
-anova_result <- aov(Log2 ~ Condition, data = temp)  
-
-summary(anova_result)
-
-tukey_result <- TukeyHSD(anova_result)
-
-tukey_df <- as.data.frame(tukey_result$Condition) 
-
-tukey_df_sig <- filter(tukey_df, `p adj` < 0.01 ) #should contain significant comparisons
+  temp <- medNorm.log2.data %>% filter(is.finite(Log2)) %>%
+    dplyr::select(Run, Protein.Info, Condition, Log2)
+  
+  anova_result <- aov(Log2 ~ Condition, data = temp)  
+  
+  summary(anova_result)
+  
+  tukey_result <- TukeyHSD(anova_result)
+  
+  tukey_df <- as.data.frame(tukey_result$Condition) 
+  
+  tukey_df_sig <- filter(tukey_df, `p adj` < 0.01 )
 
 ############### Additional Analysis ############################################
 
-#Step Seven: Calculate Fold Changes normalized to user-defined control
+#Calculate Fold Changes normalized to user-defined control
 
 #Define the control group
 control <- treatments[1]  
@@ -465,92 +497,76 @@ Avg.FC.log2 %>%
        x = "Log2 Fold Change",
        y = "-Log10 Adjusted p-value")
 
+#Clustering (Using K-Means Clustering)
 
-#Step Eight: Clustering (Using K-Means Clustering)
-library(NbClust)
-library(clusterCrit)
-library(factoextra)
-library(cluster)
-library(fpc)
-library(pheatmap)
+  #Copy the data
+  clusterDF <- Avg.FC.log2
+  
+  #Replace NAs with zero
+  clusterDF[is.na(clusterDF)] <- 0
+  
+  #Reformat
+  clusterDF.mean <- clusterDF %>%
+    unite(Protein.Info, Protein, UniProt.Id, sep = "*") %>% column_to_rownames(var = "Protein.Info")
+  
+  ######## Run this when deciding the number of kmeans clusters ###############
+  #Change this to change the limit to amount of clusters you calculate for
+  clusLength <- 20
+  
+  result <- fviz_nbclust(clusterDF.mean, kmeans, method = "wss", k.max = clusLength)
+  print(result)
+  elbow <- result$data
+  
+  #start for the silhouette score calculation
+  silPoints <- 1
+  df.silhouette <- data.frame(k = 2:clusLength)
+  
+  for(i in 1:20){  for(k in 2:clusLength){
+    # Perform k-means clustering
+    kmeans_result <- kmeans(clusterDF.mean, centers = k)
+    # Compute silhouette information using silhouette function
+    sil_info <- silhouette(kmeans_result$cluster, dist(as.matrix(clusterDF.mean)))
+    silPoints[k-1] <- summary(sil_info)$avg.width
+  }
+    silhouetteDf <- data.frame(k = 2:clusLength, Score = silPoints)
+    df.silhouette <- left_join(df.silhouette, silhouetteDf, by = 'k')
+  }
+  
+  row_sds <- apply(df.silhouette, 1, sd)
+  row_mean <- apply(df.silhouette, 1, median)
+  
+  df.silMean <- data.frame(k = df.silhouette$k, means = row_mean, stdev = row_sds)
+  
+  silhouttePlot <- ggplot(silhouetteDf, aes(x = k, y = Score)) +
+    geom_line() +
+    theme_classic()
+  silhouttePlot
+  
+  silhouttePlot <- ggplot(df.silMean, aes(x = k, y = means)) +
+    geom_line() +
+    theme_classic() + labs(title = "Average of 100 Silhouette Scores")
+  silhouttePlot
+  #############################################################################
+  
+  #Change clusAmount to be the amount of clusters you decide on, based on the above plots
+  clusAmount = 10 
 
-clusterDF <- Avg.FC.log2
-clusterDF[is.na(clusterDF)] <- 0
-
-clusterDF.mean <- clusterDF %>% #filter(Avg.50 != 0 | Avg.60 != 0) %>%
-  unite(Protein.Info, Protein, UniProt.Id, sep = "*") %>% column_to_rownames(var = "Protein.Info")
-
-######## Run this when deciding the number of kmeans clusters ###############
-#Change this to change the limit to amount of clusters you calculate for
-clusLength <- 20
-
-# #remove the normalized condtion column that is all 0
-# clusterDF.mean <- clusterDF.mean.all[ ,-1]
-
-result <- fviz_nbclust(clusterDF.mean, kmeans, method = "wss", k.max = clusLength)
-print(result)
-elbow <- result$data
-
-#start for the silhouette score calculation
-silPoints <- 1
-df.silhouette <- data.frame(k = 2:clusLength)
-
-for(i in 1:20){  for(k in 2:clusLength){
-  # Perform k-means clustering
-  kmeans_result <- kmeans(clusterDF.mean, centers = k)
-  # Compute silhouette information using silhouette function
-  sil_info <- silhouette(kmeans_result$cluster, dist(as.matrix(clusterDF.mean)))
-  silPoints[k-1] <- summary(sil_info)$avg.width
-}
-  silhouetteDf <- data.frame(k = 2:clusLength, Score = silPoints)
-  df.silhouette <- left_join(df.silhouette, silhouetteDf, by = 'k')
-}
-
-row_sds <- apply(df.silhouette, 1, sd)
-row_mean <- apply(df.silhouette, 1, median)
-
-df.silMean <- data.frame(k = df.silhouette$k, means = row_mean, stdev = row_sds)
-
-silhouttePlot <- ggplot(silhouetteDf, aes(x = k, y = Score)) +
-  geom_line() +
-  theme_classic()
-silhouttePlot
-
-silhouttePlot <- ggplot(df.silMean, aes(x = k, y = means)) +
-  geom_line() +
-  theme_classic() + labs(title = "Average of 100 Silhouette Scores")
-silhouttePlot
-
-clusAmount = 10 #Change clusAmount to be the amount of clusters you decide on, based on the above plots
-
-d <- clusterDF.mean
-
-# Perform hierarchical clustering
-dist_matrix <- dist(d)  # Compute distance matrix
-hc <- hclust(dist_matrix, method = "complete")  # Perform hierarchical clustering
-
-# Perform hierarchical clustering
-clustering_rows <- hclust(dist(d)) 
-
-# Create the heatmap
-set.seed(52)   
-pheatmap.kmean<-pheatmap(d, kmeans_k = clusAmount, cluster_rows = TRUE, cluster_cols = FALSE,
-                         clustering_method = "complete",  # You can change the method as needed
-                         cutree_rows = 1,  # Number of clusters for rows, estimated from dendrogram above
-                         main = "Heatmap of Proteins with Hierarchical Clustering using K-means", 
-                         labels_row = d$Protein.Group,
-                         color = hcl.colors(50, "Temps"), fontsize_row = 10, display_numbers = TRUE)
-
-cluster.values <- pheatmap.kmean$kmeans$cluster %>% data.frame() %>% rownames_to_column() %>%
-  setNames(c("Protein.Info","Cluster"))
-
-clusterDF.mean.fixed <- clusterDF.mean %>% 
-  rownames_to_column(var = "Protein.Info") %>% full_join(cluster.values, by = "Protein.Info") %>%
-  separate_wider_delim(col = Protein.Info, names = c("Protein", "UniProt.AC"), delim = "*")
-
-#Export proteins with cluster assignment
-#write.csv(clusterDF.mean.fixed, "Avg.FC.log2.A.Kmean.csv")
-
-
-
+  # Create the heatmap
+  set.seed(52)   
+  pheatmap.kmean<-pheatmap(clusterDF.mean, kmeans_k = clusAmount, cluster_rows = TRUE, cluster_cols = FALSE,
+                           clustering_method = "complete",  # You can change the method as needed
+                           cutree_rows = 1,  # Number of clusters for rows, estimated from dendrogram above
+                           main = "Heatmap of Proteins with Hierarchical Clustering using K-means", 
+                           labels_row = clusterDF.mean$Protein.Group,
+                           color = hcl.colors(50, "Temps"), fontsize_row = 10, display_numbers = TRUE)
+  
+  cluster.values <- pheatmap.kmean$kmeans$cluster %>% data.frame() %>% rownames_to_column() %>%
+    setNames(c("Protein.Info","Cluster"))
+  
+  clusterDF.mean.fixed <- clusterDF.mean %>% 
+    rownames_to_column(var = "Protein.Info") %>% full_join(cluster.values, by = "Protein.Info") %>%
+    separate_wider_delim(col = Protein.Info, names = c("Protein", "UniProt.AC"), delim = "*")
+  
+  #Export proteins with cluster assignment
+  #write.csv(clusterDF.mean.fixed, "Avg.FC.log2.A.Kmean.csv")
 
