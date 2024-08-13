@@ -77,11 +77,10 @@ tmt.dda.qc <- function(df){
       dplyr::rename(MS_Run = "X_1", TMT = "X_2", Condition = "X_3") %>%   #Replace column names
       mutate(Protein.Info = paste0(Gene_Symbol,'*',Accession)) %>% #Combine columns and separate by '*'
       select(-Gene_Symbol, -Accession)                             #remove irrelevant columns
-  }
-  else{                                                            #if no pattern 'GN=' detected
+  }else{                                                            #if no pattern 'GN=' detected
     data.sorted <- raw.data %>%                                    #take our raw file
       dplyr::rename(Gene_Symbol = `Gene Symbol`) %>%
-      select(Accession, Description, "Gene Symbol",                #select relevant columns
+      select(Accession, Description, Gene_Symbol,                #select relevant columns
              starts_with("Abundance:")) %>%
       pivot_longer(                                                #pivot longer
         cols = starts_with("Abundance:"), 
@@ -151,9 +150,11 @@ filter.NA <- function(df, points = 3){
   
   df_subset <- df %>% dplyr::select(Run, Protein.Info, Intensity)
   
-  df.wide <- df_subset %>% pivot_wider(                         #take the data.frame, pivot wider
+  df.wide <- df_subset %>% data.frame() %>%
+    pivot_wider(                         #take the data.frame, pivot wider
     names_from = 'Run', 
-    values_from = 'Intensity'
+    values_from = 'Intensity',
+    values_fn = list(Intensity = median) #if there are any list-cols present, the median will be taken
   )
   
   for(i in treatments){                                  #for each treatment specified
@@ -351,7 +352,7 @@ data.groupInfo <- data %>%
   inner_join(sample_groups, by = "Run")
 
 #Plot the PCA analysis - change 'colour' to grouping variable (MS_Run, Condition, etc.)
-autoplot(data.prcomp, data=data.groupInfo, label= FALSE, size=4, colour = 'MS_Run') +
+autoplot(data.prcomp, data=data.groupInfo, label= TRUE, size=4, colour = 'MS_Run') +
   theme(axis.title.x = element_text(size = 12), axis.title.y = element_text(size = 12)) +
   labs(title = "A. Principal Component Analysis Plot")
 
@@ -361,22 +362,32 @@ autoplot(data.prcomp, data=data.groupInfo, label= FALSE, size=4, colour = 'MS_Ru
 # Multiple t.tests w/ p.adj(method = "fdr")  -  For comparison of 2 groups
 # ANOVA / Mixed Model  -  For comparison of >= 3 groups
 
+  # #If needed, use these lines to separate the "Condition" column into individual pieces for statistical testing
+  # medNorm.log2.data.sep <- medNorm.log2.data %>% 
+  #   separate_wider_delim(cols = Condition, names = c("Condition", "Condition_1"), delim = ",") #add more columns if needed
+
 #Perform Multiple unpaired t.tests with equal variance - Visualize via Volcano Plot
 comparison <- c("treatment", "control") #define in order of [treatment - control]
 
-proteins.log2.long.stat <- medNorm.log2.data %>%
+#Filter for specified comparison and perform t.tests
+proteins.log2.long.stat <- medNorm.log2.data %>% data.frame() %>%
   dplyr::select(Run, Protein.Info, Condition, Log2) %>%
   filter(Condition %in% comparison) %>%
   mutate(Condition = factor(Condition, levels = comparison)) %>%
-  group_by(Protein.Info, Condition) %>% filter(n() > 2) %>% ungroup() %>%
+  group_by(Protein.Info, Condition) %>% filter(n() >= 2) %>% 
+  
+  #Note: Default is minimum 3 points present in both groups for t.test. [filter(n() >= 3)]
+  #However, R allows a minimum of 2 points to output a p.value. [filter(n() >= 2)]
+  #Change at your own discretion.
+  
+  ungroup() %>%
   group_by(Protein.Info) %>% filter(n_distinct(Condition) == 2) %>%
   do(tidy(t.test(Log2 ~ Condition, data = ., var.equal = TRUE)))
 
 #Adjust p-values
 result.volcano <- proteins.log2.long.stat %>% data.frame() %>%
-  mutate(p.adj = p.adjust(p.value, method = "fdr", n = length(p.value))) %>%
+  mutate(p.adj = p.adjust(p.value, method = "fdr")) %>%
   select(Protein.Info, estimate, p.adj) %>% 
-  #column_to_rownames(var = 'Protein.Info') %>% 
   separate_wider_delim(cols = "Protein.Info", names = c("Protein", "Accession"), delim = "*") %>%
   data.frame()
 
