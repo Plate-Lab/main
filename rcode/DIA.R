@@ -615,7 +615,7 @@ ggplot(protein.count, aes(x= Run, y=Count, fill = group)) +
     inner_join(sample.groups.v2, by = "Run")
   
   #Plot the PCA analysis
-  autoplot(data.prcomp, data=data.groupInfo, label= FALSE, size=4, colour = 'group') +
+  autoplot(data.prcomp, data=data.groupInfo, label= TRUE, size=4, colour = 'group') +
     theme(axis.title.x = element_text(size = 12), axis.title.y = element_text(size = 12)) +
     labs(title = "A. Principal Component Analysis Plot")
 
@@ -632,20 +632,25 @@ proteins.filtered <- filter.NA(proteins.medNorm.log2, points = 3)
 #Perform Multiple unpaired t.tests with equal variance - Visualize via Volcano Plot [Ex. DIA]
 comparison <- c("treatment", "control") #define in order of [treatment - control]
 
-proteins.log2.long.stat <- proteins.filtered %>%
+proteins.log2.long.stat <- proteins.filtered %>% data.frame() %>%
   pivot_longer(cols = 2:ncol(.), names_to = "Run", values_to = "Log2") %>%
   na.omit() %>% inner_join(sample.groups.v2, by = "Run") %>%
   filter(group %in% comparison) %>%
   mutate(group = factor(group, levels = comparison)) %>%
-  group_by(Protein.Info, group) %>% filter(n() > 2) %>% ungroup() %>%
+  group_by(Protein.Info, group) %>% filter(n() >= 2) %>% 
+  
+  #Note: Default is minimum 3 points present in both groups for t.test. [filter(n() >= 3)]
+  #However, R allows a minimum of 2 points to output a p.value. [filter(n() >= 2)]
+  #Change at your own discretion.
+  
+  ungroup() %>%
   group_by(Protein.Info) %>% filter(n_distinct(group) == 2) %>%
   do(tidy(t.test(Log2 ~ group, data = ., var.equal = TRUE)))
 
 #Adjust p-values
 result.volcano <- proteins.log2.long.stat %>% data.frame() %>%
-  mutate(p.adj = p.adjust(p.value, method = "fdr", n = length(p.value))) %>%
+  mutate(p.adj = p.adjust(p.value, method = "fdr")) %>%
   select(Protein.Info, estimate, p.adj) %>% 
-  #column_to_rownames(var = 'Protein.Info') %>% 
   separate_wider_delim(cols = "Protein.Info", names = c("Protein", "Accession"), delim = "*") %>%
   data.frame()
 
