@@ -3,7 +3,7 @@
 # MS Proteomics Pipeline - DIA Unlabeled - Written for DIA-NN report.tsv files ONLY
   #DIA-NN:  Demichev, V., et al. (2020). https://doi.org/10.1038/s41592-019-0638-x
 
-#Version 1.1 - Release: July 12, 2024
+#Version 1.1 - Release: August 13, 2024
 
 #Written by Sarah Garcia, Lea Barny, Jake Hermanson - 2024
 
