@@ -2,7 +2,7 @@
 
 # MS Proteomics Pipeline - DDA TMT-Labeled
 
-#Version 1.1 - Released July 25th
+#Version 1.1 - Released August 13th, 2024
 
 #Written by Sarah Garcia, Lea Barny, Jake Hermanson - 2024
 
